@@ -1,0 +1,11 @@
+.dub/
+dub.selections.json
+*.o
+*.obj
+*.lst
+*.a
+*.lib
+bc-threads
+bc-threads-test-*
+__test__library__
+__dummy.html
