@@ -1,4 +1,4 @@
-/// A minimal fork-join thread pool used by `ecrs.parallel`. Backed directly
+/// A minimal fork-join thread pool used by `bct.parallel`. Backed directly
 /// by POSIX threads + unnamed semaphores on Linux, or Win32 threads +
 /// semaphore objects on Windows - `core.thread` needs druntime's GC-backed
 /// TLS/fiber setup, which isn't available under `-betterC`. Any other
@@ -34,9 +34,10 @@
 /// zero - worse, it also stops that worker from looping back to help drain
 /// the very queue it's waiting on. Fork-and-forget via `submit`, not
 /// fork-and-join via `run`/`wait`, is the reentrant-safe pattern here.
-module ecrs.threadpool;
+module bct.threadpool;
 
 import fp.dynarray;
+import fp.pointer;
 import core.atomic : atomicOp, atomicLoad, atomicStore, cas;
 
 @nogc nothrow:
@@ -85,9 +86,11 @@ struct Job {
 static if (threadingSupported) {
 
 	/// Queue + synchronization shared by every worker in a pool. Heap
-	/// allocated (rather than embedded directly in `ThreadPool`) so its
-	/// address stays stable even though `ThreadPool` itself is returned by
-	/// value from `create()` - workers capture a pointer to this, not to
+	/// allocated with `fp.pointer.malloc` - a single fixed instance, not a
+	/// growable array, so it gets the plain allocator rather than
+	/// `fp.dynarray`'s - rather than embedded directly in `ThreadPool`, so
+	/// its address stays stable even though `ThreadPool` itself is returned
+	/// by value from `create()` - workers capture a pointer to this, not to
 	/// the pool.
 	private struct PoolState {
 		version (linux) sem_t wake;
@@ -169,7 +172,7 @@ static if (threadingSupported) {
 			ThreadPool pool;
 			pool.count = workerCount > 0 ? workerCount : hardwareConcurrency();
 			fp.dynarray.growToSize(pool.handles, pool.count);
-			fp.dynarray.growToSize(pool.state, 1);
+			pool.state = fp.pointer.malloc!PoolState(1);
 			*pool.state = PoolState.init;
 
 			version (linux) {
@@ -262,7 +265,7 @@ static if (threadingSupported) {
 			else version (Windows) { CloseHandle(state.wake); CloseHandle(state.done); }
 			fp.dynarray.free(state.queue);
 			fp.dynarray.free(handles);
-			fp.dynarray.free(state);
+			fp.pointer.free(state);
 			count = 0;
 		}
 	}

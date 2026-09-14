@@ -1,10 +1,10 @@
 # bc-threads
 
 A minimal, `-betterC`-compatible fork-join thread pool for D (module
-`ecrs.threadpool`). Backed by POSIX threads + unnamed semaphores on Linux,
+`bct.threadpool`). Backed by POSIX threads + unnamed semaphores on Linux,
 or Win32 threads + semaphore objects on Windows; any other platform gets a
 degenerate single-"worker" pool that runs jobs inline. See the module doc
-comment in [source/ecrs/threadpool.d](source/ecrs/threadpool.d) for the
+comment in [source/bct/threadpool.d](source/bct/threadpool.d) for the
 full design notes (queue ownership, reentrant `submit`, why a job must
 never call `wait` on itself, etc).
 

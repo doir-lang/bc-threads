@@ -4,9 +4,10 @@
 module runner;
 
 import std.meta : AliasSeq;
-import ecrs.threadpool;
+import bct.threadpool;
+import bct.channel;
 
-private alias ModuleList = AliasSeq!(ecrs.threadpool);
+private alias ModuleList = AliasSeq!(bct.threadpool, bct.channel);
 
 extern (C) void main() {
 	import core.stdc.stdio : printf;
