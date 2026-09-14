@@ -7,13 +7,18 @@
 /// buffer on any other platform, since there's nothing else running
 /// concurrently there to ever unblock a wait.
 ///
+/// `Channel!T` is a plain heap-allocated struct (see `create`); every
+/// operation on it is a free function taking the `Channel!T*` returned by
+/// `create()` as its first argument - `bct.threadpool`'s convention,
+/// carried over from `fp.dynarray`.
+///
 /// `send` blocks while the channel is full; `receive` blocks while it's
 /// empty. `close` wakes every `send`/`receive` currently blocked on the
 /// channel: a `receive` on a closed channel keeps draining whatever's still
 /// buffered(returning a non-null value) until it's empty, then returns
 /// `Nullable!T.init` - the same `v, ok := <-ch` contract Go gives you, just
 /// spelled as a `Nullable!T` instead of a tuple, so `if(auto v =
-/// ch.receive())` scopes the received value to just the branch that got one.
+/// receive(ch))` scopes the received value to just the branch that got one.
 /// `send` on a closed channel always fails immediately(`false`) instead of
 /// blocking, since nothing will ever come along to unblock it. Unlike Go,
 /// there's no unbuffered(capacity 0) mode - `create()` requires at least
@@ -43,8 +48,8 @@ version(linux) {
 	enum bool threadingSupported = false;
 }
 
-/// Pass this to `Channel.create()` for an unbounded channel - see the
-/// module doc comment.
+/// Pass this to `create()` for an unbounded channel - see the module doc
+/// comment.
 enum size_t dynamicExtent = size_t.max;
 
 
@@ -62,25 +67,24 @@ static if(threadingSupported) {
 		private void semDestroy(ref HANDLE h) @trusted @nogc nothrow { CloseHandle(h); }
 	}
 
-	/// Ring buffer(or, when `capacity == dynamicExtent`, a plain growable
-	/// `fp.dynarray`) + synchronization shared by every `send`/`receive` on
-	/// a channel. The state itself is one fixed instance, not a growable
-	/// array, so it's heap allocated with `fp.pointer.malloc` rather than
-	/// `fp.dynarray` (like `ThreadPool`'s `PoolState`) - its address stays
-	/// stable across copies of the `Channel` handle either way.
-	private struct ChannelState(T) {
+	/// An MPMC blocking channel, fixed-capacity or(with `dynamicExtent`)
+	/// unbounded. Heap allocated by `create()` (with `fp.pointer.malloc`, a
+	/// single fixed instance rather than a growable array) so its address
+	/// stays stable across every handle to it. Backed by a ring
+	/// buffer(or, when `capacity == dynamicExtent`, a plain growable
+	/// `fp.dynarray`), guarded entirely by `lock` - same convention as
+	/// `bct.threadpool.ThreadPool.queueLock`. Fixed capacity: a
+	/// `capacity`-slot ring buffer, `head`/`count` indexing modulo
+	/// `capacity`. Dynamic extent: `head` stays 0 and unused - values are
+	/// appended with `pushBack` and removed from the front with
+	/// `removeAt(..., 0)` instead, same as the no-threading fallback below.
+	struct Channel(T) {
 		version(linux) sem_t itemAvailable;
 		else version(Windows) HANDLE itemAvailable;
 
 		version(linux) sem_t spaceAvailable;
 		else version(Windows) HANDLE spaceAvailable;
 
-		// Fixed capacity: a `capacity`-slot ring buffer, `head`/`count`
-		// indexing modulo `capacity`. Dynamic extent: `head` stays 0 and
-		// unused - values are appended with `pushBack` and removed from the
-		// front with `removeAt(..., 0)` instead, same as the no-threading
-		// fallback below. Either way, guarded entirely by `lock` - same
-		// convention as `PoolState.queue`/`queueLock`.
 		T* buffer = null;
 		size_t capacity = 0;
 		size_t head = 0;
@@ -103,135 +107,123 @@ static if(threadingSupported) {
 		shared ptrdiff_t receiversWaiting = 0;
 	}
 
-	private void acquire(T)(ChannelState!T* state) @trusted @nogc nothrow {
-		while(!cas(&state.lock, cast(uint) 0, cast(uint) 1)) {}
+	private void acquire(T)(Channel!T* ch) @trusted @nogc nothrow {
+		while(!cas(&ch.lock, cast(uint) 0, cast(uint) 1)) {}
 	}
-	private void release(T)(ChannelState!T* state) @trusted @nogc nothrow {
-		atomicStore(state.lock, cast(uint) 0);
+	private void release(T)(Channel!T* ch) @trusted @nogc nothrow {
+		atomicStore(ch.lock, cast(uint) 0);
 	}
 
-	/// An MPMC blocking channel, fixed-capacity or(with `dynamicExtent`)
-	/// unbounded. Non-copyable(like `ThreadPool`) - destructing the last
-	/// handle's owner should call `free()` to release the semaphores and
-	/// backing buffer.
-	struct Channel(T) {
-		private ChannelState!T* state = null;
+	/// `capacity` must be at least 1, or `dynamicExtent` for an
+	/// unbounded channel - see the module doc comment.
+	Channel!T* create(T)(size_t capacity) @trusted @nogc nothrow {
+		assert(capacity > 0);
+		auto ch = fp.pointer.malloc!(Channel!T)(1);
+		*ch = Channel!T.init;
+		ch.capacity = capacity;
+		if(capacity != dynamicExtent)
+			ch.buffer = fp.dynarray.create!(T)(capacity);
+		semInit(ch.itemAvailable);
+		semInit(ch.spaceAvailable);
+		return ch;
+	}
 
-		/// `capacity` must be at least 1, or `dynamicExtent` for an
-		/// unbounded channel - see the module doc comment.
-		static Channel!T create(size_t capacity) @trusted @nogc nothrow {
-			assert(capacity > 0);
-			Channel!T ch;
-			ch.state = fp.pointer.malloc!(ChannelState!T)(1);
-			*ch.state = ChannelState!T.init;
-			ch.state.capacity = capacity;
-			if(capacity != dynamicExtent)
-				ch.state.buffer = fp.dynarray.create!(T)(capacity);
-			semInit(ch.state.itemAvailable);
-			semInit(ch.state.spaceAvailable);
-			return ch;
+	size_t capacity(T)(const Channel!T* ch) @nogc nothrow { return ch.capacity; }
+
+	/// Number of values currently buffered.
+	size_t length(T)(Channel!T* ch) @trusted @nogc nothrow {
+		acquire(ch);
+		immutable n = ch.count;
+		release(ch);
+		return n;
+	}
+
+	bool isClosed(T)(const Channel!T* ch) @trusted @nogc nothrow { return atomicLoad(ch.closed); }
+
+	/// Blocks while the channel is full - never, when `capacity ==
+	/// dynamicExtent`, since there's no ring buffer to fill: it just
+	/// grows instead. Returns `false` instead of sending if the channel
+	/// is(or becomes, while blocked) closed - see `Channel.sendersWaiting`
+	/// for why a blocked call is always woken by a matching `close()`.
+	bool send(T)(Channel!T* ch, T value) @trusted @nogc nothrow {
+		immutable dynamic = ch.capacity == dynamicExtent;
+		while(true) {
+			acquire(ch);
+			if(atomicLoad(ch.closed)) { release(ch); return false; }
+			if(dynamic) {
+				fp.dynarray.pushBack(ch.buffer, value);
+				ch.count++;
+				release(ch);
+				semPost(ch.itemAvailable);
+				return true;
+			}
+			if(ch.count < ch.capacity) {
+				ch.buffer[(ch.head + ch.count) % ch.capacity] = value;
+				ch.count++;
+				release(ch);
+				semPost(ch.itemAvailable);
+				return true;
+			}
+			atomicOp!"+="(ch.sendersWaiting, cast(ptrdiff_t) 1);
+			release(ch);
+			semWait(ch.spaceAvailable);
+			atomicOp!"-="(ch.sendersWaiting, cast(ptrdiff_t) 1);
 		}
+	}
 
-		@disable this(this);
-
-		size_t capacity() const @nogc nothrow { return state.capacity; }
-
-		/// Number of values currently buffered.
-		size_t length() @trusted @nogc nothrow {
-			acquire(state);
-			immutable n = state.count;
-			release(state);
-			return n;
-		}
-
-		bool isClosed() const @trusted @nogc nothrow { return atomicLoad(state.closed); }
-
-		/// Blocks while the channel is full - never, when `capacity ==
-		/// dynamicExtent`, since there's no ring buffer to fill: it just
-		/// grows instead. Returns `false` instead of sending if the channel
-		/// is(or becomes, while blocked) closed - see
-		/// `ChannelState.sendersWaiting` for why a blocked call is always
-		/// woken by a matching `close()`.
-		bool send(T value) @trusted @nogc nothrow {
-			immutable dynamic = state.capacity == dynamicExtent;
-			while(true) {
-				acquire(state);
-				if(atomicLoad(state.closed)) { release(state); return false; }
+	/// Blocks while the channel is empty and open. Returns the next value
+	/// once something's available - buffered values included, even
+	/// after `close()` - or `Nullable!T.init` once the channel is closed
+	/// and fully drained, mirroring Go's `v, ok := <-ch`.
+	Nullable!T receive(T)(Channel!T* ch) @trusted @nogc nothrow {
+		immutable dynamic = ch.capacity == dynamicExtent;
+		while(true) {
+			acquire(ch);
+			if(ch.count > 0) {
+				T value;
 				if(dynamic) {
-					fp.dynarray.pushBack(state.buffer, value);
-					state.count++;
-					release(state);
-					semPost(state.itemAvailable);
-					return true;
+					value = *fp.dynarray.front(ch.buffer);
+					fp.dynarray.removeAt(ch.buffer, 0);
+				} else {
+					value = ch.buffer[ch.head];
+					ch.head =(ch.head + 1) % ch.capacity;
 				}
-				if(state.count < state.capacity) {
-					state.buffer[(state.head + state.count) % state.capacity] = value;
-					state.count++;
-					release(state);
-					semPost(state.itemAvailable);
-					return true;
-				}
-				atomicOp!"+="(state.sendersWaiting, cast(ptrdiff_t) 1);
-				release(state);
-				semWait(state.spaceAvailable);
-				atomicOp!"-="(state.sendersWaiting, cast(ptrdiff_t) 1);
+				ch.count--;
+				release(ch);
+				// Nobody ever blocks on `spaceAvailable` in dynamic
+				// mode - `send` never waits there - so posting it would
+				// just accumulate unconsumed permits forever.
+				if(!dynamic) semPost(ch.spaceAvailable);
+				return nullable(value);
 			}
+			if(atomicLoad(ch.closed)) { release(ch); return Nullable!T.init; }
+			atomicOp!"+="(ch.receiversWaiting, cast(ptrdiff_t) 1);
+			release(ch);
+			semWait(ch.itemAvailable);
+			atomicOp!"-="(ch.receiversWaiting, cast(ptrdiff_t) 1);
 		}
+	}
 
-		/// Blocks while the channel is empty and open. Returns the next value
-		/// once something's available - buffered values included, even
-		/// after `close()` - or `Nullable!T.init` once the channel is closed
-		/// and fully drained, mirroring Go's `v, ok := <-ch`.
-		Nullable!T receive() @trusted @nogc nothrow {
-			immutable dynamic = state.capacity == dynamicExtent;
-			while(true) {
-				acquire(state);
-				if(state.count > 0) {
-					T value;
-					if(dynamic) {
-						value = *fp.dynarray.front(state.buffer);
-						fp.dynarray.removeAt(state.buffer, 0);
-					} else {
-						value = state.buffer[state.head];
-						state.head =(state.head + 1) % state.capacity;
-					}
-					state.count--;
-					release(state);
-					// Nobody ever blocks on `spaceAvailable` in dynamic
-					// mode - `send` never waits there - so posting it would
-					// just accumulate unconsumed permits forever.
-					if(!dynamic) semPost(state.spaceAvailable);
-					return nullable(value);
-				}
-				if(atomicLoad(state.closed)) { release(state); return Nullable!T.init; }
-				atomicOp!"+="(state.receiversWaiting, cast(ptrdiff_t) 1);
-				release(state);
-				semWait(state.itemAvailable);
-				atomicOp!"-="(state.receiversWaiting, cast(ptrdiff_t) 1);
-			}
-		}
+	/// Marks the channel closed and wakes every `send`/`receive`
+	/// currently blocked on it. Closing an already-closed channel is
+	/// undefined(matches Go).
+	void close(T)(Channel!T* ch) @trusted @nogc nothrow {
+		acquire(ch);
+		atomicStore(ch.closed, true);
+		immutable senders = atomicLoad(ch.sendersWaiting);
+		immutable receivers = atomicLoad(ch.receiversWaiting);
+		release(ch);
+		foreach(_; 0 .. senders) semPost(ch.spaceAvailable);
+		foreach(_; 0 .. receivers) semPost(ch.itemAvailable);
+	}
 
-		/// Marks the channel closed and wakes every `send`/`receive`
-		/// currently blocked on it. Closing an already-closed channel is
-		/// undefined(matches Go).
-		void close() @trusted @nogc nothrow {
-			acquire(state);
-			atomicStore(state.closed, true);
-			immutable senders = atomicLoad(state.sendersWaiting);
-			immutable receivers = atomicLoad(state.receiversWaiting);
-			release(state);
-			foreach(_; 0 .. senders) semPost(state.spaceAvailable);
-			foreach(_; 0 .. receivers) semPost(state.itemAvailable);
-		}
-
-		void free() @trusted @nogc nothrow {
-			if(state is null) return;
-			if(!isClosed()) close();
-			semDestroy(state.itemAvailable);
-			semDestroy(state.spaceAvailable);
-			fp.dynarray.free(state.buffer);
-			fp.pointer.free(state);
-		}
+	void free(T)(Channel!T* ch) @trusted @nogc nothrow {
+		if(ch is null) return;
+		if(!isClosed(ch)) close(ch);
+		semDestroy(ch.itemAvailable);
+		semDestroy(ch.spaceAvailable);
+		fp.dynarray.free(ch.buffer);
+		fp.pointer.free(ch);
 	}
 
 } else {
@@ -241,60 +233,53 @@ static if(threadingSupported) {
 	/// channel or drain a full one, so `send`/`receive` never block - they
 	/// just report failure instead. Amounts to `dynamicExtent` behavior
 	/// unconditionally, regardless of what `capacity` was requested.
-	private struct ChannelState(T) {
+	struct Channel(T) {
 		T* buffer = null;
 		size_t capacity = 0;
 		bool closed = false;
 	}
 
-	struct Channel(T) {
-		private ChannelState!T* state = null;
+	Channel!T* create(T)(size_t capacity) @trusted @nogc nothrow {
+		assert(capacity > 0);
+		auto ch = fp.pointer.malloc!(Channel!T)(1);
+		*ch = Channel!T.init;
+		ch.capacity = capacity;
+		// `capacity` is only ever a reservation hint here - `send`
+		// grows the buffer regardless - so a literal `dynamicExtent`
+		//(`size_t.max`) reservation must be skipped rather than
+		// attempted.
+		if(capacity != dynamicExtent)
+			fp.dynarray.reserve(ch.buffer, capacity);
+		return ch;
+	}
 
-		static Channel!T create(size_t capacity) @trusted @nogc nothrow {
-			assert(capacity > 0);
-			Channel!T ch;
-			ch.state = fp.pointer.malloc!(ChannelState!T)(1);
-			*ch.state = ChannelState!T.init;
-			ch.state.capacity = capacity;
-			// `capacity` is only ever a reservation hint here - `send`
-			// grows the buffer regardless - so a literal `dynamicExtent`
-			//(`size_t.max`) reservation must be skipped rather than
-			// attempted.
-			if(capacity != dynamicExtent)
-				fp.dynarray.reserve(ch.state.buffer, capacity);
-			return ch;
-		}
+	size_t capacity(T)(const Channel!T* ch) @nogc nothrow { return ch.capacity; }
+	size_t length(T)(Channel!T* ch) @trusted @nogc nothrow { return fp.dynarray.length(ch.buffer); }
+	bool isClosed(T)(const Channel!T* ch) @nogc nothrow { return ch.closed; }
 
-		@disable this(this);
+	/// Grows the buffer instead of blocking - see the module doc comment.
+	bool send(T)(Channel!T* ch, T value) @trusted @nogc nothrow {
+		if(ch.closed) return false;
+		fp.dynarray.pushBack(ch.buffer, value);
+		return true;
+	}
 
-		size_t capacity() const @nogc nothrow { return state.capacity; }
-		size_t length() @trusted @nogc nothrow { return fp.dynarray.length(state.buffer); }
-		bool isClosed() const @trusted @nogc nothrow { return state.closed; }
+	/// Reports an empty channel the same whether or not it's closed,
+	/// rather than blocking forever waiting for a value that nothing is
+	/// ever going to send.
+	Nullable!T receive(T)(Channel!T* ch) @trusted @nogc nothrow {
+		if(fp.dynarray.length(ch.buffer) == 0) return Nullable!T.init;
+		T value = *fp.dynarray.front(ch.buffer);
+		fp.dynarray.removeAt(ch.buffer, 0);
+		return nullable(value);
+	}
 
-		/// Grows the buffer instead of blocking - see the module doc comment.
-		bool send(T value) @trusted @nogc nothrow {
-			if(state.closed) return false;
-			fp.dynarray.pushBack(state.buffer, value);
-			return true;
-		}
+	void close(T)(Channel!T* ch) @nogc nothrow { ch.closed = true; }
 
-		/// Reports an empty channel the same whether or not it's closed,
-		/// rather than blocking forever waiting for a value that nothing is
-		/// ever going to send.
-		Nullable!T receive() @trusted @nogc nothrow {
-			if(fp.dynarray.length(state.buffer) == 0) return Nullable!T.init;
-			T value = *fp.dynarray.front(state.buffer);
-			fp.dynarray.removeAt(state.buffer, 0);
-			return nullable(value);
-		}
-
-		void close() @trusted @nogc nothrow { state.closed = true; }
-
-		void free() @trusted @nogc nothrow {
-			if(state is null) return;
-			fp.dynarray.free(state.buffer);
-			fp.pointer.free(state);
-		}
+	void free(T)(Channel!T* ch) @trusted @nogc nothrow {
+		if(ch is null) return;
+		fp.dynarray.free(ch.buffer);
+		fp.pointer.free(ch);
 	}
 }
 
@@ -304,26 +289,26 @@ unittest {
 	// buffered-values-survive-close contract: `receive` keeps draining
 	// whatever's already buffered after `close`, only reporting `false`
 	// once that's exhausted.
-	auto ch = Channel!int.create(4);
-	scope(exit) ch.free();
+	auto ch = create!int(4);
+	scope(exit) free(ch);
 
-	assert(ch.capacity() == 4);
-	assert(ch.length() == 0);
-	assert(!ch.isClosed());
+	assert(capacity(ch) == 4);
+	assert(length(ch) == 0);
+	assert(!isClosed(ch));
 
-	foreach(i; 0 .. 3) assert(ch.send(i));
-	assert(ch.length() == 3);
+	foreach(i; 0 .. 3) assert(send(ch, i));
+	assert(length(ch) == 3);
 
-	ch.close();
-	assert(ch.isClosed());
-	assert(!ch.send(99)); // closed: no new sends, even though there's room
+	close(ch);
+	assert(isClosed(ch));
+	assert(!send(ch, 99)); // closed: no new sends, even though there's room
 
 	foreach(i; 0 .. 3) {
-		auto v = ch.receive();
+		auto v = receive(ch);
 		assert(!v.isNull);
 		assert(v.get() == i);
 	}
-	assert(ch.receive().isNull); // drained and closed
+	assert(receive(ch).isNull); // drained and closed
 }
 
 
@@ -332,25 +317,25 @@ unittest {
 	// blocking - and `capacity()` reports the sentinel back unchanged.
 	// `receive` still preserves FIFO order and the drain-then-null-on-close
 	// contract exactly as the fixed-capacity case does.
-	auto ch = Channel!int.create(dynamicExtent);
-	scope(exit) ch.free();
+	auto ch = create!int(dynamicExtent);
+	scope(exit) free(ch);
 
-	assert(ch.capacity() == dynamicExtent);
-	assert(ch.length() == 0);
+	assert(capacity(ch) == dynamicExtent);
+	assert(length(ch) == 0);
 
 	enum n = 500; // far more than any reasonable fixed ring buffer
-	foreach(i; 0 .. n) assert(ch.send(i));
-	assert(ch.length() == n);
+	foreach(i; 0 .. n) assert(send(ch, i));
+	assert(length(ch) == n);
 
-	ch.close();
-	assert(!ch.send(99)); // closed: still no new sends
+	close(ch);
+	assert(!send(ch, 99)); // closed: still no new sends
 
 	foreach(i; 0 .. n) {
-		auto v = ch.receive();
+		auto v = receive(ch);
 		assert(!v.isNull);
 		assert(v.get() == i);
 	}
-	assert(ch.receive().isNull); // drained and closed
+	assert(receive(ch).isNull); // drained and closed
 }
 
 
@@ -359,32 +344,32 @@ unittest {
 	// producer to block on `send` until the consumer's `receive` catches up,
 	// and vice versa - the pool's worker threads stand in for independent
 	// goroutines here.
-	import bct.threadpool : ThreadPool, Job;
+	import bct.threadpool;
 
-	auto pool = ThreadPool.create(2);
-	scope(exit) pool.free();
+	auto pool = bct.threadpool.create(2);
+	scope(exit) bct.threadpool.free(pool);
 
-	auto ch = Channel!int.create(1);
-	scope(exit) ch.free();
+	auto ch = create!int(1);
+	scope(exit) free(ch);
 
 	static struct ProducerArg { Channel!int* ch; int count; }
 	static void produce(void* arg) @nogc nothrow {
 		auto a = cast(ProducerArg*) arg;
-		foreach(i; 0 .. a.count) a.ch.send(i);
-		a.ch.close();
+		foreach(i; 0 .. a.count) send(a.ch, i);
+		close(a.ch);
 	}
 
 	static struct ConsumerArg { Channel!int* ch; int sum; int received; }
 	static void consume(void* arg) @nogc nothrow {
 		auto a = cast(ConsumerArg*) arg;
-		while(auto v = a.ch.receive()) { a.sum += v.get(); a.received++; }
+		while(auto v = receive(a.ch)) { a.sum += v.get(); a.received++; }
 	}
 
 	enum n = 50;
-	auto producerArg = ProducerArg(&ch, n);
-	auto consumerArg = ConsumerArg(&ch, 0, 0);
+	auto producerArg = ProducerArg(ch, n);
+	auto consumerArg = ConsumerArg(ch, 0, 0);
 
-	Job[2] jobs = [Job(&produce, &producerArg), Job(&consume, &consumerArg)];
+	bct.threadpool.Job[2] jobs = [bct.threadpool.Job(&produce, &producerArg), bct.threadpool.Job(&consume, &consumerArg)];
 	pool.run(jobs[]);
 
 	assert(consumerArg.received == n);
@@ -397,25 +382,25 @@ unittest {
 unittest {
 	// `close` must wake a `receive` that's already blocked on an empty
 	// channel, not just ones that show up afterwards.
-	import bct.threadpool : ThreadPool, Job;
+	import bct.threadpool;
 
-	auto pool = ThreadPool.create(2);
-	scope(exit) pool.free();
+	auto pool = bct.threadpool.create(2);
+	scope(exit) bct.threadpool.free(pool);
 
-	auto ch = Channel!int.create(1);
-	scope(exit) ch.free();
+	auto ch = create!int(1);
+	scope(exit) free(ch);
 
 	static struct Result { Channel!int* ch; bool ok; }
 	static void receiveOnce(void* arg) @nogc nothrow {
 		auto r = cast(Result*) arg;
-		r.ok = !r.ch.receive().isNull;
+		r.ok = !receive(r.ch).isNull;
 	}
 
-	Result result = Result(&ch, true);
-	Job[1] jobs = [Job(&receiveOnce, &result)];
+	Result result = Result(ch, true);
+	bct.threadpool.Job[1] jobs = [bct.threadpool.Job(&receiveOnce, &result)];
 	pool.submit(jobs[]); // receiver blocks: nothing's been sent
 
-	ch.close();
+	close(ch);
 	pool.wait();
 
 	assert(!result.ok);
@@ -425,26 +410,26 @@ unittest {
 unittest {
 	// Symmetric case: `close` must also wake a `send` blocked on a full
 	// channel, since nothing is ever going to `receive` to make room again.
-	import bct.threadpool : ThreadPool, Job;
+	import bct.threadpool;
 
-	auto pool = ThreadPool.create(2);
-	scope(exit) pool.free();
+	auto pool = bct.threadpool.create(2);
+	scope(exit) bct.threadpool.free(pool);
 
-	auto ch = Channel!int.create(1);
-	scope(exit) ch.free();
+	auto ch = create!int(1);
+	scope(exit) free(ch);
 
 	static struct Result { Channel!int* ch; bool ok; }
 	static void sendTwice(void* arg) @nogc nothrow {
 		auto r = cast(Result*) arg;
-		r.ch.send(1);          // fills the one slot, doesn't block
-		r.ok = r.ch.send(2);   // blocks: no room, no receiver
+		send(r.ch, 1);          // fills the one slot, doesn't block
+		r.ok = send(r.ch, 2);   // blocks: no room, no receiver
 	}
 
-	Result result = Result(&ch, true);
-	Job[1] jobs = [Job(&sendTwice, &result)];
+	Result result = Result(ch, true);
+	bct.threadpool.Job[1] jobs = [bct.threadpool.Job(&sendTwice, &result)];
 	pool.submit(jobs[]);
 
-	ch.close();
+	close(ch);
 	pool.wait();
 
 	assert(!result.ok);
