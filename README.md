@@ -1,13 +1,13 @@
 # bc-threads
 
 A minimal, `-betterC`-compatible fork-join thread pool for D (module
-`bct.threadpool`). Backed by POSIX threads + unnamed semaphores on Linux,
+`bc.threadpool`). Backed by POSIX threads + unnamed semaphores on Linux,
 POSIX threads + Mach semaphores on macOS(unnamed POSIX semaphores are
 declared there but never implemented - `sem_init` always fails with
 `ENOSYS`), or Win32 threads + semaphore objects on Windows; any other
 platform gets a degenerate single-"worker" pool that runs jobs inline. See
 the module doc comment in
-[source/bct/threadpool.d](source/bct/threadpool.d) for the full design
+[source/bc/threadpool.d](source/bc/threadpool.d) for the full design
 notes (queue ownership, reentrant `submit`, why a job must never call
 `wait` on itself, etc).
 

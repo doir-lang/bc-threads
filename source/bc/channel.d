@@ -1,76 +1,30 @@
-module bct.channel;
+module bc.channel;
 
 import fp.dynarray;
 import fp.pointer;
+import bc.thread;
+import bc.mutex;
+import bc.semaphore;
+
 import core.atomic : atomicOp, atomicLoad, atomicStore, cas;
 import std.typecons : Nullable, nullable;
 
 @nogc nothrow:
 
-version(linux) {
-	import core.sys.posix.semaphore : sem_t, sem_init, sem_wait, sem_post, sem_destroy;
-	enum bool threadingSupported = true;
-} else version(OSX) {
-	import core.stdc.errno : errno, EINTR;
-	import core.sys.darwin.mach.kern_return : KERN_ABORTED;
-	import core.sys.darwin.mach.semaphore :
-		mach_task_self, semaphore_create, semaphore_destroy, semaphore_signal,
-		semaphore_t, semaphore_wait, SYNC_POLICY_FIFO;
-	enum bool threadingSupported = true;
-} else version(Windows) {
-	import core.sys.windows.windows : HANDLE, CreateSemaphoreA, ReleaseSemaphore, WaitForSingleObject, CloseHandle, INFINITE;
-	enum bool threadingSupported = true;
-} else {
-	enum bool threadingSupported = false;
-}
-
-/// Pass this to `create()` for an unbounded channel - see the module doc
-/// comment.
 enum size_t dynamicExtent = size_t.max;
 
 
 static if(threadingSupported) {
 
-	version(linux) {
-		private void semInit(ref sem_t s) @trusted @nogc nothrow { sem_init(&s, 0, 0); }
-		private void semWait(ref sem_t s) @trusted @nogc nothrow { sem_wait(&s); }
-		private void semPost(ref sem_t s) @trusted @nogc nothrow { sem_post(&s); }
-		private void semDestroy(ref sem_t s) @trusted @nogc nothrow { sem_destroy(&s); }
-	} else version(OSX) {
-		private void semInit(ref semaphore_t s) @trusted @nogc nothrow {
-			semaphore_create(mach_task_self(), &s, SYNC_POLICY_FIFO, 0);
-		}
-		private void semWait(ref semaphore_t s) @trusted @nogc nothrow {
-			while(true) {
-				immutable rc = semaphore_wait(s);
-				if(!rc) return;
-				if(rc == KERN_ABORTED && errno == EINTR) continue;
-				return;
-			}
-		}
-		private void semPost(ref semaphore_t s) @trusted @nogc nothrow { semaphore_signal(s); }
-		private void semDestroy(ref semaphore_t s) @trusted @nogc nothrow { semaphore_destroy(mach_task_self(), s); }
-	} else version(Windows) {
-		private void semInit(ref HANDLE h) @trusted @nogc nothrow { h = CreateSemaphoreA(null, 0, int.max, null); }
-		private void semWait(ref HANDLE h) @trusted @nogc nothrow { WaitForSingleObject(h, INFINITE); }
-		private void semPost(ref HANDLE h) @trusted @nogc nothrow { ReleaseSemaphore(h, 1, null); }
-		private void semDestroy(ref HANDLE h) @trusted @nogc nothrow { CloseHandle(h); }
-	}
-
 	struct Channel(T) {
-		version(linux) sem_t itemAvailable;
-		else version(OSX) semaphore_t itemAvailable;
-		else version(Windows) HANDLE itemAvailable;
-
-		version(linux) sem_t spaceAvailable;
-		else version(OSX) semaphore_t spaceAvailable;
-		else version(Windows) HANDLE spaceAvailable;
+		Semaphore itemAvailable;
+		Semaphore spaceAvailable;
 
 		T* buffer = null;
 		size_t capacity = 0;
 		size_t head = 0;
 		size_t count = 0;
-		shared uint lock = 0;
+		Mutex lock;
 
 		shared bool closed = false;
 
@@ -78,12 +32,8 @@ static if(threadingSupported) {
 		shared ptrdiff_t receiversWaiting = 0;
 	}
 
-	private void acquire(T)(Channel!T* ch) @trusted @nogc nothrow {
-		while(!cas(&ch.lock, cast(uint) 0, cast(uint) 1)) {}
-	}
-	private void release(T)(Channel!T* ch) @trusted @nogc nothrow {
-		atomicStore(ch.lock, cast(uint) 0);
-	}
+	private void acquire(T)(Channel!T* ch) @trusted @nogc nothrow { bc.mutex.writeLock(ch.lock); }
+	private void release(T)(Channel!T* ch) @trusted @nogc nothrow { bc.mutex.writeUnlock(ch.lock); }
 
 	Channel!T* create(T)(size_t capacity) @trusted @nogc nothrow {
 		assert(capacity > 0);
@@ -92,8 +42,9 @@ static if(threadingSupported) {
 		ch.capacity = capacity;
 		if(capacity != dynamicExtent)
 			ch.buffer = fp.dynarray.create!(T)(capacity);
-		semInit(ch.itemAvailable);
-		semInit(ch.spaceAvailable);
+		ch.itemAvailable = bc.semaphore.create(0);
+		ch.spaceAvailable = bc.semaphore.create(cast(uint)capacity);
+		ch.lock = bc.mutex.create();
 		return ch;
 	}
 
@@ -117,19 +68,19 @@ static if(threadingSupported) {
 				fp.dynarray.pushBack(ch.buffer, value);
 				ch.count++;
 				release(ch);
-				semPost(ch.itemAvailable);
+				bc.semaphore.post(ch.itemAvailable);
 				return true;
 			}
 			if(ch.count < ch.capacity) {
 				ch.buffer[(ch.head + ch.count) % ch.capacity] = value;
 				ch.count++;
 				release(ch);
-				semPost(ch.itemAvailable);
+				bc.semaphore.post(ch.itemAvailable);
 				return true;
 			}
 			atomicOp!"+="(ch.sendersWaiting, cast(ptrdiff_t) 1);
 			release(ch);
-			semWait(ch.spaceAvailable);
+			bc.semaphore.wait(ch.spaceAvailable);
 			atomicOp!"-="(ch.sendersWaiting, cast(ptrdiff_t) 1);
 		}
 	}
@@ -149,13 +100,13 @@ static if(threadingSupported) {
 				}
 				ch.count--;
 				release(ch);
-				if(!dynamic) semPost(ch.spaceAvailable);
+				if(!dynamic) bc.semaphore.post(ch.spaceAvailable);
 				return nullable(value);
 			}
 			if(atomicLoad(ch.closed)) { release(ch); return Nullable!T.init; }
 			atomicOp!"+="(ch.receiversWaiting, cast(ptrdiff_t) 1);
 			release(ch);
-			semWait(ch.itemAvailable);
+			bc.semaphore.wait(ch.itemAvailable);
 			atomicOp!"-="(ch.receiversWaiting, cast(ptrdiff_t) 1);
 		}
 	}
@@ -166,15 +117,16 @@ static if(threadingSupported) {
 		immutable senders = atomicLoad(ch.sendersWaiting);
 		immutable receivers = atomicLoad(ch.receiversWaiting);
 		release(ch);
-		foreach(_; 0 .. senders) semPost(ch.spaceAvailable);
-		foreach(_; 0 .. receivers) semPost(ch.itemAvailable);
+		foreach(_; 0 .. senders) bc.semaphore.post(ch.spaceAvailable);
+		foreach(_; 0 .. receivers) bc.semaphore.post(ch.itemAvailable);
 	}
 
 	void free(T)(Channel!T* ch) @trusted @nogc nothrow {
 		if(ch is null) return;
 		if(!isClosed(ch)) close(ch);
-		semDestroy(ch.itemAvailable);
-		semDestroy(ch.spaceAvailable);
+		bc.semaphore.free(ch.itemAvailable);
+		bc.semaphore.free(ch.spaceAvailable);
+		bc.mutex.free(ch.lock);
 		fp.dynarray.free(ch.buffer);
 		fp.pointer.free(ch);
 	}
@@ -281,10 +233,10 @@ unittest {
 	// producer to block on `send` until the consumer's `receive` catches up,
 	// and vice versa - the pool's worker threads stand in for independent
 	// goroutines here.
-	import bct.threadpool;
+	import bc.threadpool;
 
-	auto pool = bct.threadpool.create(2);
-	scope(exit) bct.threadpool.free(pool);
+	auto pool = bc.threadpool.create(2);
+	scope(exit) bc.threadpool.free(pool);
 
 	auto ch = create!int(1);
 	scope(exit) free(ch);
@@ -306,7 +258,7 @@ unittest {
 	auto producerArg = ProducerArg(ch, n);
 	auto consumerArg = ConsumerArg(ch, 0, 0);
 
-	bct.threadpool.Job[2] jobs = [bct.threadpool.Job(&produce, &producerArg), bct.threadpool.Job(&consume, &consumerArg)];
+	bc.threadpool.Job[2] jobs = [bc.threadpool.Job(&produce, &producerArg), bc.threadpool.Job(&consume, &consumerArg)];
 	pool.run(jobs[]);
 
 	assert(consumerArg.received == n);
@@ -317,10 +269,10 @@ unittest {
 
 
 unittest {
-	import bct.threadpool;
+	import bc.threadpool;
 
-	auto pool = bct.threadpool.create(2);
-	scope(exit) bct.threadpool.free(pool);
+	auto pool = bc.threadpool.create(2);
+	scope(exit) bc.threadpool.free(pool);
 
 	auto ch = create!int(1);
 	scope(exit) free(ch);
@@ -332,7 +284,7 @@ unittest {
 	}
 
 	Result result = Result(ch, true);
-	bct.threadpool.Job[1] jobs = [bct.threadpool.Job(&receiveOnce, &result)];
+	bc.threadpool.Job[1] jobs = [bc.threadpool.Job(&receiveOnce, &result)];
 	pool.submit(jobs[]);
 
 	close(ch);
@@ -343,10 +295,10 @@ unittest {
 
 
 unittest {
-	import bct.threadpool;
+	import bc.threadpool;
 
-	auto pool = bct.threadpool.create(2);
-	scope(exit) bct.threadpool.free(pool);
+	auto pool = bc.threadpool.create(2);
+	scope(exit) bc.threadpool.free(pool);
 
 	auto ch = create!int(1);
 	scope(exit) free(ch);
@@ -359,7 +311,7 @@ unittest {
 	}
 
 	Result result = Result(ch, true);
-	bct.threadpool.Job[1] jobs = [bct.threadpool.Job(&sendTwice, &result)];
+	bc.threadpool.Job[1] jobs = [bc.threadpool.Job(&sendTwice, &result)];
 	pool.submit(jobs[]);
 
 	close(ch);

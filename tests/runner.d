@@ -1,10 +1,15 @@
 module runner;
 
 import std.meta : AliasSeq;
-import bct.threadpool;
-import bct.channel;
+import bc.threadpool;
+import bc.channel;
+import bc.thread;
+import bc.semaphore;
+import bc.mutex;
 
-private alias ModuleList = AliasSeq!(bct.threadpool, bct.channel);
+private alias ModuleList = AliasSeq!(
+	bc.threadpool, bc.channel, bc.thread, bc.semaphore, bc.mutex
+);
 
 extern (C) void main() {
 	import core.stdc.stdio : printf;

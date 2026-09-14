@@ -1,142 +1,78 @@
-module bct.threadpool;
+module bc.threadpool;
 
 import fp.dynarray;
 import fp.pointer;
-import core.atomic : atomicOp, atomicLoad, atomicStore, cas;
+import bc.thread;
+import bc.mutex;
+import bc.semaphore;
+import core.atomic : atomicOp, atomicLoad, atomicStore;
 
 @nogc nothrow:
 
-version (linux) {
-	import core.sys.posix.pthread : pthread_t, pthread_create, pthread_join;
-	import core.sys.posix.semaphore : sem_t, sem_init, sem_wait, sem_post, sem_destroy;
-	import core.sys.posix.unistd : sysconf, _SC_NPROCESSORS_ONLN;
-	enum bool threadingSupported = true;
-	version = PthreadBackend;
-} else version (OSX) {
-	import core.sys.posix.pthread : pthread_t, pthread_create, pthread_join;
-	import core.stdc.errno : errno, EINTR;
-	import core.sys.darwin.mach.kern_return : KERN_ABORTED;
-	import core.sys.darwin.mach.semaphore :
-		mach_task_self, semaphore_create, semaphore_destroy, semaphore_signal,
-		semaphore_t, semaphore_wait, SYNC_POLICY_FIFO;
-	import core.sys.darwin.sys.sysctl : sysctlbyname;
-	enum bool threadingSupported = true;
-	version = PthreadBackend;
-} else version (Windows) {
-	import core.sys.windows.windows :
-		HANDLE, DWORD, CreateThread, WaitForSingleObject, CloseHandle,
-		INFINITE, GetSystemInfo, SYSTEM_INFO, CreateSemaphoreA, ReleaseSemaphore;
-	enum bool threadingSupported = true;
-} else {
-	enum bool threadingSupported = false;
-}
+public import bc.platform : threadingSupported;
+import bc.thread : hardwareConcurrency;
+import bc.platform : PthreadBackendMixin;
+
+// version identifiers are module-local, so bc.platform's `PthreadBackend`
+// tag doesn't reach here - mixin the shared declaration for the
+// extern(C)/extern(Windows) worker entry point below, which must match
+// bc.thread.ThreadFunction exactly.
+mixin(PthreadBackendMixin);
+version (Windows) import core.sys.windows.windows : DWORD;
 
 
-size_t hardwareConcurrency() @trusted @nogc nothrow {
-	version (linux) {
-		immutable n = sysconf(_SC_NPROCESSORS_ONLN);
-		return n > 0 ? cast(size_t) n : 1;
-	} else version (OSX) {
-		uint n;
-		size_t len = n.sizeof;
-		sysctlbyname("hw.physicalcpu", &n, &len, null, 0);
-		return n > 0 ? cast(size_t) n : 1;
-	} else version (Windows) {
-		SYSTEM_INFO info;
-		GetSystemInfo(&info);
-		return info.dwNumberOfProcessors > 0 ? cast(size_t) info.dwNumberOfProcessors : 1;
-	} else
-		return 1;
-}
-
-
-alias JobFn = void function(void*) @nogc nothrow;
+alias JobFunction = void function(void*) @nogc nothrow;
 
 struct Job {
-	JobFn fn;
+	JobFunction fn;
 	void* arg;
 }
 
 
 static if (threadingSupported) {
 
-	version (linux) {
-		private void semInit(ref sem_t s) @trusted @nogc nothrow { sem_init(&s, 0, 0); }
-		private void semWait(ref sem_t s) @trusted @nogc nothrow { sem_wait(&s); }
-		private void semPost(ref sem_t s) @trusted @nogc nothrow { sem_post(&s); }
-		private void semDestroy(ref sem_t s) @trusted @nogc nothrow { sem_destroy(&s); }
-	} else version (OSX) {
-		private void semInit(ref semaphore_t s) @trusted @nogc nothrow {
-			semaphore_create(mach_task_self(), &s, SYNC_POLICY_FIFO, 0);
-		}
-		private void semWait(ref semaphore_t s) @trusted @nogc nothrow {
-			while(true) {
-				immutable rc = semaphore_wait(s);
-				if(!rc) return;
-				if(rc == KERN_ABORTED && errno == EINTR) continue;
-				return;
-			}
-		}
-		private void semPost(ref semaphore_t s) @trusted @nogc nothrow { semaphore_signal(s); }
-		private void semDestroy(ref semaphore_t s) @trusted @nogc nothrow { semaphore_destroy(mach_task_self(), s); }
-	} else version (Windows) {
-		private void semInit(ref HANDLE h) @trusted @nogc nothrow { h = CreateSemaphoreA(null, 0, int.max, null); }
-		private void semWait(ref HANDLE h) @trusted @nogc nothrow { WaitForSingleObject(h, INFINITE); }
-		private void semPost(ref HANDLE h) @trusted @nogc nothrow { ReleaseSemaphore(h, 1, null); }
-		private void semDestroy(ref HANDLE h) @trusted @nogc nothrow { CloseHandle(h); }
-	}
-
 	struct ThreadPool {
-		version (linux) sem_t wake;
-		else version (OSX) semaphore_t wake;
-		else version (Windows) HANDLE wake;
-
-		version (linux) sem_t done;
-		else version (OSX) semaphore_t done;
-		else version (Windows) HANDLE done;
+		Semaphore wake;
+		Semaphore done;
 
 		Job* queue = null;
-		shared uint queueLock = 0;
+		Mutex queueLock;
 
 		shared ptrdiff_t outstanding = 0;
 		shared bool stopping = false;
 
-		version (PthreadBackend) private pthread_t* handles = null;
-		else version (Windows) private HANDLE* handles = null;
+		private bc.thread.Thread* handles = null;
 		private size_t count = 0;
 	}
 
 	private Job claimJob(ThreadPool* pool) @trusted @nogc nothrow {
-		while (!cas(&pool.queueLock, cast(uint) 0, cast(uint) 1)) {}
+		bc.mutex.writeLock(pool.queueLock);
 		Job job = *fp.dynarray.back(pool.queue);
 		fp.dynarray.popBack(pool.queue);
-		atomicStore(pool.queueLock, cast(uint) 0);
+		bc.mutex.writeUnlock(pool.queueLock);
 		return job;
+	}
+
+	private void workerLoop(ThreadPool* pool) @trusted @nogc nothrow {
+		while (true) {
+			bc.semaphore.wait(pool.wake);
+			if (atomicLoad(pool.stopping)) return;
+			Job job = claimJob(pool);
+			job.fn(job.arg);
+			atomicOp!"-="(pool.outstanding, cast(ptrdiff_t) 1);
+			bc.semaphore.post(pool.done);
+		}
 	}
 
 	version (PthreadBackend) {
 		extern (C) private void* workerMain(void* arg) @nogc nothrow {
-			auto pool = cast(ThreadPool*) arg;
-			while (true) {
-				semWait(pool.wake);
-				if (atomicLoad(pool.stopping)) return null;
-				Job job = claimJob(pool);
-				job.fn(job.arg);
-				atomicOp!"-="(pool.outstanding, cast(ptrdiff_t) 1);
-				semPost(pool.done);
-			}
+			workerLoop(cast(ThreadPool*) arg);
+			return null;
 		}
 	} else version (Windows) {
 		extern (Windows) private DWORD workerMain(void* arg) @nogc nothrow {
-			auto pool = cast(ThreadPool*) arg;
-			while (true) {
-				semWait(pool.wake);
-				if (atomicLoad(pool.stopping)) return 0;
-				Job job = claimJob(pool);
-				job.fn(job.arg);
-				atomicOp!"-="(pool.outstanding, cast(ptrdiff_t) 1);
-				semPost(pool.done);
-			}
+			workerLoop(cast(ThreadPool*) arg);
+			return 0;
 		}
 	}
 
@@ -146,12 +82,12 @@ static if (threadingSupported) {
 		pool.count = workerCount > 0 ? workerCount : hardwareConcurrency();
 		fp.dynarray.growToSize(pool.handles, pool.count);
 
-		semInit(pool.wake);
-		semInit(pool.done);
+		pool.wake = bc.semaphore.create(0);
+		pool.done = bc.semaphore.create(0);
+		pool.queueLock = bc.mutex.create();
 
 		foreach (i; 0 .. pool.count)
-			version (PthreadBackend) pthread_create(&pool.handles[i], null, &workerMain, pool);
-			else version (Windows) pool.handles[i] = CreateThread(null, 0, &workerMain, pool, 0, null);
+			pool.handles[i] = bc.thread.create(&workerMain, pool);
 		return pool;
 	}
 
@@ -164,16 +100,16 @@ static if (threadingSupported) {
 	void submit(ThreadPool* pool, scope Job[] jobs) @trusted @nogc nothrow {
 		if (jobs.length == 0) return;
 
-		while (!cas(&pool.queueLock, cast(uint) 0, cast(uint) 1)) {}
+		bc.mutex.writeLock(pool.queueLock);
 		foreach (ref job; jobs) fp.dynarray.pushBack(pool.queue, job);
-		atomicStore(pool.queueLock, cast(uint) 0);
+		bc.mutex.writeUnlock(pool.queueLock);
 
 		atomicOp!"+="(pool.outstanding, cast(ptrdiff_t) jobs.length);
-		foreach (_; 0 .. jobs.length) semPost(pool.wake);
+		foreach (_; 0 .. jobs.length) bc.semaphore.post(pool.wake);
 	}
 
 	void wait(ThreadPool* pool) @trusted @nogc nothrow {
-		while (atomicLoad(pool.outstanding) > 0) semWait(pool.done);
+		while (atomicLoad(pool.outstanding) > 0) bc.semaphore.wait(pool.done);
 	}
 
 	void waitJobCount(ThreadPool* pool, size_t count) @trusted @nogc nothrow {
@@ -189,13 +125,11 @@ static if (threadingSupported) {
 	void free(ThreadPool* pool) @trusted @nogc nothrow {
 		if (pool is null || pool.handles is null) return;
 		atomicStore(pool.stopping, true);
-		foreach (i; 0 .. pool.count) semPost(pool.wake);
-		foreach (i; 0 .. pool.count) {
-			version (PthreadBackend) pthread_join(pool.handles[i], null);
-			else version (Windows) { WaitForSingleObject(pool.handles[i], INFINITE); CloseHandle(pool.handles[i]); }
-		}
-		semDestroy(pool.wake);
-		semDestroy(pool.done);
+		foreach (i; 0 .. pool.count) bc.semaphore.post(pool.wake);
+		foreach (i; 0 .. pool.count) bc.thread.join(pool.handles[i]);
+		bc.semaphore.free(pool.wake);
+		bc.semaphore.free(pool.done);
+		bc.mutex.free(pool.queueLock);
 		fp.dynarray.free(pool.queue);
 		fp.dynarray.free(pool.handles);
 		fp.pointer.free(pool);
