@@ -66,3 +66,58 @@ unittest {
 	post(s);
 	wait(s); // already signalled, must not block
 }
+
+
+// Covers the plain `return` on line 40 above: an obviously-invalid port
+// name makes semaphore_wait fail immediately with a real (non-interrupt)
+// error, rather than the successful or EINTR-retry paths.
+version(OSX)
+static if(threadingSupported)
+unittest {
+	Semaphore bogus;
+	bogus.handle = cast(semaphore_t) int.max;
+	wait(bogus);
+}
+
+
+// Covers the EINTR retry on line 39 above, which only fires when a real
+// signal interrupts a thread actually blocked inside semaphore_wait.
+version(OSX)
+static if(threadingSupported)
+unittest {
+	import core.sys.posix.signal : sigaction_t, SIGUSR1, pthread_kill;
+	import core.sys.posix.unistd : usleep;
+	import bc.thread;
+
+	// `sigaction` predates druntime's nothrow/@nogc block for this module,
+	// so pull in the real libc symbol under the attributes this module
+	// needs. Leaving sa_mask at its zero .init gives an empty signal mask,
+	// and sa_flags = 0 deliberately omits SA_RESTART so the syscall aborts
+	// instead of transparently restarting.
+	pragma(mangle, "sigaction")
+	extern(C) nothrow @nogc int sigactionNoGC(int, const scope sigaction_t*, sigaction_t*);
+	extern(C) nothrow @nogc void noop(int) {}
+
+	sigaction_t act;
+	act.sa_handler = &noop;
+	sigactionNoGC(SIGUSR1, &act, null);
+
+	Semaphore s = create();
+	scope(exit) free(s);
+
+	static void blockOnWait(Semaphore* s) @nogc nothrow { wait(*s); }
+	bc.thread.Thread t = bc.thread.create(&blockOnWait, &s);
+
+	// There's no signal from inside the blocking mach trap saying "the
+	// thread is in it now", so send SIGUSR1 repeatedly for a while: any
+	// delivery that lands while the thread is inside semaphore_wait aborts
+	// it with KERN_ABORTED/EINTR, exercising the retry branch; deliveries
+	// that land earlier are harmless no-ops.
+	foreach(_; 0 .. 200) {
+		pthread_kill(t.handle, SIGUSR1);
+		usleep(1000);
+	}
+
+	post(s);
+	bc.thread.join(t);
+}

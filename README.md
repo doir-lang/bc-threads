@@ -55,7 +55,13 @@ libfp's `.lst` files from the report so the numbers cover `bc` only.
 The platform backends are selected by `version`, so a run only measures the
 host's: on Linux the Windows and Mach branches of `bc.semaphore` and
 `bc.mutex` are never compiled, and lines that were compiled out are left
-out of the totals rather than counted as missed.
+out of the totals rather than counted as missed. Each host therefore needs
+its own run to say anything about its own backend.
+
+The script is bash, so on Windows it wants Git Bash or MSYS2 rather than
+`cmd`/PowerShell. There it has to translate between the `C:\dir` paths dub
+reports and the `/c/dir` ones the shell's own tools take, and strip the CR
+that dub's CRLF output leaves on the end of every path.
 
 ## Dependency on libfp
 

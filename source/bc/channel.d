@@ -24,7 +24,7 @@ static if(threadingSupported) {
 		size_t capacity = 0;
 		size_t head = 0;
 		size_t count = 0;
-		Mutex lock;
+		Mutex* lock;
 
 		shared bool closed = false;
 

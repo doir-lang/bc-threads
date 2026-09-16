@@ -5,7 +5,9 @@ dub.selections.json
 *.lst
 *.a
 *.lib
+*.pdb
 bc-threads
+bc-threads.exe
 bc-threads-test-*
 __test__library__
 __dummy.html

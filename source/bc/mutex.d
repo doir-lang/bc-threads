@@ -1,6 +1,7 @@
 module bc.mutex;
 
 import bc.platform : threadingSupported, PthreadBackendMixin;
+import fp.pointer;
 
 @nogc nothrow:
 
@@ -37,44 +38,51 @@ static if(threadingSupported) {
 	version(PthreadBackend) struct Mutex { pthread_rwlock_t handle; }
 	else version(Windows) struct Mutex { SRWLOCK handle; }
 
-	Mutex create() @trusted @nogc nothrow {
-		Mutex m;
+	// Heap-allocated and never relocated after `create`: on Darwin,
+	// pthread_rwlock_t's internal state is bound to the struct's address at
+	// init time, so moving/copying an initialized one to a different address
+	// (e.g. returning it by value into a caller-owned field) corrupts it and
+	// every subsequent lock call blocks forever.
+	Mutex* create() @trusted @nogc nothrow {
+		auto m = fp.pointer.malloc!Mutex(1);
+		*m = Mutex.init;
 		version(PthreadBackend) pthread_rwlock_init(&m.handle, null);
 		else version(Windows) InitializeSRWLock(&m.handle);
 		return m;
 	}
 
-	void free(ref Mutex m) @trusted @nogc nothrow {
+	void free(Mutex* m) @trusted @nogc nothrow {
 		version(PthreadBackend) pthread_rwlock_destroy(&m.handle);
 		else version(Windows) {}
+		fp.pointer.free(m);
 	}
 
-	bool tryReadLock(ref Mutex m) @trusted @nogc nothrow {
+	bool tryReadLock(Mutex* m) @trusted @nogc nothrow {
 		version(PthreadBackend) return pthread_rwlock_tryrdlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockShared(&m.handle) != 0;
 	}
 
-	void readLock(ref Mutex m) @trusted @nogc nothrow {
+	void readLock(Mutex* m) @trusted @nogc nothrow {
 		version(PthreadBackend) pthread_rwlock_rdlock(&m.handle);
 		else version(Windows) AcquireSRWLockShared(&m.handle);
 	}
 
-	void readUnlock(ref Mutex m) @trusted @nogc nothrow {
+	void readUnlock(Mutex* m) @trusted @nogc nothrow {
 		version(PthreadBackend) pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockShared(&m.handle);
 	}
 
-	bool tryWriteLock(ref Mutex m) @trusted @nogc nothrow {
+	bool tryWriteLock(Mutex* m) @trusted @nogc nothrow {
 		version(PthreadBackend) return pthread_rwlock_trywrlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockExclusive(&m.handle) != 0;
 	}
 
-	void writeLock(ref Mutex m) @trusted @nogc nothrow {
+	void writeLock(Mutex* m) @trusted @nogc nothrow {
 		version(PthreadBackend) pthread_rwlock_wrlock(&m.handle);
 		else version(Windows) AcquireSRWLockExclusive(&m.handle);
 	}
 
-	void writeUnlock(ref Mutex m) @trusted @nogc nothrow {
+	void writeUnlock(Mutex* m) @trusted @nogc nothrow {
 		version(PthreadBackend) pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockExclusive(&m.handle);
 	}
@@ -87,11 +95,15 @@ static if(threadingSupported) {
 
 	struct Mutex { shared int state = 0; }
 
-	Mutex create() @nogc nothrow { return Mutex.init; }
+	Mutex* create() @trusted @nogc nothrow {
+		auto m = fp.pointer.malloc!Mutex(1);
+		*m = Mutex.init;
+		return m;
+	}
 
-	void free(ref Mutex m) @nogc nothrow {}
+	void free(Mutex* m) @trusted @nogc nothrow { fp.pointer.free(m); }
 
-	bool tryReadLock(ref Mutex m) @trusted @nogc nothrow {
+	bool tryReadLock(Mutex* m) @trusted @nogc nothrow {
 		int cur = atomicLoad(m.state);
 		while(cur >= 0) {
 			if(cas(&m.state, cur, cur + 1)) return true;
@@ -100,23 +112,23 @@ static if(threadingSupported) {
 		return false;
 	}
 
-	void readLock(ref Mutex m) @nogc nothrow {
+	void readLock(Mutex* m) @nogc nothrow {
 		while(!tryReadLock(m)) {}
 	}
 
-	void readUnlock(ref Mutex m) @trusted @nogc nothrow {
+	void readUnlock(Mutex* m) @trusted @nogc nothrow {
 		atomicOp!"-="(m.state, 1);
 	}
 
-	bool tryWriteLock(ref Mutex m) @trusted @nogc nothrow {
+	bool tryWriteLock(Mutex* m) @trusted @nogc nothrow {
 		return cas(&m.state, 0, -1);
 	}
 
-	void writeLock(ref Mutex m) @nogc nothrow {
+	void writeLock(Mutex* m) @nogc nothrow {
 		while(!tryWriteLock(m)) {}
 	}
 
-	void writeUnlock(ref Mutex m) @trusted @nogc nothrow {
+	void writeUnlock(Mutex* m) @trusted @nogc nothrow {
 		atomicStore(m.state, 0);
 	}
 
@@ -124,7 +136,7 @@ static if(threadingSupported) {
 
 
 unittest {
-	Mutex m = create();
+	auto m = create();
 	scope(exit) free(m);
 
 	// multiple readers may hold the lock together

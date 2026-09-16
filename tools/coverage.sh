@@ -15,7 +15,7 @@ verbose=""
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 compiler="${DC:-ldc2}"
-out="$root/bin/coverage"
+out="bin/coverage"
 
 # LDC and DMD spell the version flag differently.
 case "$compiler" in
@@ -23,47 +23,91 @@ case "$compiler" in
 	*)     versionFlag="-d-version=" ;;
 esac
 
-rm -rf "$out"
-mkdir -p "$out"
+# Under MSYS/Git Bash, dub and the shell disagree about how to spell a path:
+# dub says `C:\dir`, while find and `[[ ]]` want `/c/dir`, and the compiler
+# and the shell's own `.exe`-less command names want something in between.
+case "$(uname -s)" in
+	MINGW*|MSYS*|CYGWIN*) windows=1; exeSuffix=".exe" ;;
+	*)                    windows="";  exeSuffix="" ;;
+esac
+
+toShellPath()    { if [ -n "$windows" ]; then cygpath -u "$1"; else printf '%s\n' "$1"; fi; }
+toCompilerPath() { if [ -n "$windows" ]; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
+
+cd "$root"
 
 # Ask dub where everything lives, so this follows dub.json rather than
-# repeating it. `mapfile` cannot see dub failing inside a process
-# substitution, so check the arrays came back non-empty.
-mapfile -t importPaths < <(dub describe --import-paths -c unittest --compiler="$compiler")
-mapfile -t sources < <(dub describe --data=source-files --data-list -c unittest --compiler="$compiler")
+# repeating it. macOS ships bash 3.2, which has no `mapfile`, so the arrays
+# are filled with a `while read` loop instead; that loop can't see dub
+# failing inside a process substitution, so check the arrays came back
+# non-empty. dub's output is CRLF-terminated on Windows, and a stray \r
+# turns every path into one that does not exist.
+importPaths=()
+while IFS= read -r line; do importPaths+=("$line"); done \
+	< <(dub describe --import-paths -c unittest --compiler="$compiler" | tr -d '\r')
+sources=()
+while IFS= read -r line; do sources+=("$line"); done \
+	< <(dub describe --data=source-files --data-list -c unittest --compiler="$compiler" | tr -d '\r')
 if [ "${#importPaths[@]}" -eq 0 ] || [ "${#sources[@]}" -eq 0 ]; then
 	echo "coverage.sh: 'dub describe' produced nothing; cannot build." >&2
 	exit 1
 fi
 
+# -cov names each .lst after the source path it was handed, with the
+# separators flattened to `-`, so the project's own sources go to the
+# compiler relative to the root: that makes those names identical on every
+# platform, and keeps a Windows drive letter's `:` -- which is not a legal
+# filename character there -- out of them. Anything outside the root is a
+# dependency, whose .lst the report drops anyway.
+relativizeToRoot() {
+	local path; path="$(toShellPath "$1")"; path="${path%/}"
+	case "$path" in
+		"$root"/*) printf '%s\n' "${path#"$root"/}" ;;
+		*)         toCompilerPath "$path" ;;
+	esac
+}
+
+for i in "${!importPaths[@]}"; do importPaths[$i]="$(relativizeToRoot "${importPaths[$i]}")"; done
+for i in "${!sources[@]}"; do sources[$i]="$(relativizeToRoot "${sources[$i]}")"; done
+
 # dub lists only bc-threads' own modules; libfp has to be compiled in too,
-# since -I alone would leave its symbols undefined at link time.
+# since -I alone would leave its symbols undefined at link time. The paths
+# left absolute above are exactly the ones outside the project.
 for path in "${importPaths[@]}"; do
 	case "$path" in
-		"$root"/*) continue ;;
+		/*|?:*) ;;
+		*) continue ;;
 	esac
-	while IFS= read -r file; do sources+=("$file"); done < <(find "$path" -name '*.d')
+	while IFS= read -r file; do
+		sources+=("$(toCompilerPath "$file")")
+	done < <(find "$(toShellPath "$path")" -name '*.d')
 done
+
+rm -rf "$out"
+mkdir -p "$out"
 
 # Plain -cov, not -cov=ctfe: nothing here is built during compilation, so
 # counting CTFE executions would only credit lines that no test actually
 # ran.
 "$compiler" -cov -g -unittest "${versionFlag}BctCoverage" \
-	"${importPaths[@]/#/-I}" "${sources[@]}" -of="$out/bc-coverage"
+	"${importPaths[@]/#/-I}" "${sources[@]}" -of="$out/bc-coverage$exeSuffix"
 
 # Without --DRT-testmode, druntime exits before reaching main, so the runner
-# never reports.
-(cd "$out" && ./bc-coverage --DRT-testmode=run-main > run.log 2>&1) \
+# never reports. The run stays in the project root: the coverage writer
+# reopens each source by the (relative) path it was compiled with to build
+# the annotated listing, and a source it cannot find yields an empty .lst.
+# `dstpath` is what still collects those listings under `bin/`.
+"./$out/bc-coverage$exeSuffix" --DRT-testmode=run-main \
+	--DRT-covopt="dstpath:$out merge:0" > "$out/run.log" 2>&1 \
 	|| { cat "$out/run.log"; exit 1; }
 
-# .lst files are named after the source path, with the separators flattened.
 # The glob is already in alphabetical order, so remembering the order files
 # are first seen keeps the report sorted and each file's uncovered lines
 # attached to it. Dependency sources land here too; the prefix test drops
 # everything that is not bc-threads' own -- libfp gets measured by its
 # own copy of this script.
 cd "$out"
-awk -v prefix="${root//\//-}-source-" -v verbose="$verbose" '
+awk -v prefix="source-" -v verbose="$verbose" '
 	FNR == 1 {
 		base = FILENAME
 		sub(/.*\//, "", base)
@@ -72,7 +116,7 @@ awk -v prefix="${root//\//-}-source-" -v verbose="$verbose" '
 			file = substr(base, length(prefix) + 1)
 			sub(/\.lst$/, "", file)
 			gsub(/-/, "/", file)
-			file = file ".d"
+			file = "source/" file ".d"
 			if (!(file in seen)) { seen[file] = 1; order[++count] = file }
 		}
 	}

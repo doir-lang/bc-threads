@@ -36,7 +36,7 @@ static if (threadingSupported) {
 		Semaphore done;
 
 		Job* queue = null;
-		Mutex queueLock;
+		Mutex* queueLock;
 
 		shared ptrdiff_t outstanding = 0;
 		shared bool stopping = false;
