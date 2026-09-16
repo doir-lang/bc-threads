@@ -9,3 +9,4 @@ bc-threads
 bc-threads-test-*
 __test__library__
 __dummy.html
+bin

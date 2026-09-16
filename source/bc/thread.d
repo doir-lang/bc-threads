@@ -94,6 +94,16 @@ static if(threadingSupported) {
 }
 
 
+// The fallback worker count for a pool created with `workerCount == 0`, so a
+// zero here would silently build a pool that never runs anything.
+unittest {
+	immutable n = hardwareConcurrency();
+	assert(n >= 1);
+	// the query hits the OS on every call; it should not drift between them
+	assert(n == hardwareConcurrency());
+}
+
+
 static if(threadingSupported)
 unittest {
 	static shared int counter = 0;

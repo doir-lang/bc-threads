@@ -14,7 +14,7 @@
   "dependencies": {
     "libfp": {
       "repository": "git+https://github.com/doir-lang/libfp.git",
-      "version": "eb78056f75bb95d0a0f1348048693d660a9ae941"
+      "version": "25fd5ddd49510b76830ebca7bf6b6df28795a4f0"
     }
   },
   "dflags-ldc": [
