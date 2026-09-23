@@ -9,18 +9,21 @@ import bc.platform : PthreadBackendMixin;
 
 mixin(PthreadBackendMixin);
 
+// Not `version(PthreadBackend)`: imports are resolved before the string mixin
+// that declares that identifier has run.
+version(Posix) import core.sys.posix.pthread : pthread_t, pthread_create, pthread_join;
+
+// The CPU count is the one thing the two pthread platforms don't share.
 version(linux) {
-	import core.sys.posix.pthread : pthread_t, pthread_create, pthread_join;
 	import core.sys.posix.unistd : sysconf, _SC_NPROCESSORS_ONLN;
 } else version(OSX) {
-	import core.sys.posix.pthread : pthread_t, pthread_create, pthread_join;
 	import core.sys.darwin.sys.sysctl : sysctlbyname;
 } else version(Windows) {
 	import core.sys.windows.windows : HANDLE, DWORD, CreateThread, WaitForSingleObject, CloseHandle, INFINITE, GetSystemInfo, SYSTEM_INFO;
 }
 
 
-size_t hardwareConcurrency() @trusted @nogc nothrow {
+size_t hardwareConcurrency() @trusted {
 	version(linux) {
 		immutable n = sysconf(_SC_NPROCESSORS_ONLN);
 		return n > 0 ? cast(size_t) n : 1;
@@ -46,14 +49,14 @@ static if(threadingSupported) {
 	version(PthreadBackend) struct Thread { pthread_t handle; }
 	else version(Windows) struct Thread { HANDLE handle; }
 
-	Thread create(ThreadFunction fn, void* arg) @trusted @nogc nothrow {
+	Thread create(ThreadFunction fn, void* arg) @trusted {
 		Thread t;
 		version(PthreadBackend) pthread_create(&t.handle, null, fn, arg);
 		else version(Windows) t.handle = CreateThread(null, 0, fn, arg, 0, null);
 		return t;
 	}
 
-	void join(ref Thread t) @trusted @nogc nothrow {
+	void join(ref Thread t) @trusted {
 		version(PthreadBackend) pthread_join(t.handle, null);
 		else version(Windows) { WaitForSingleObject(t.handle, INFINITE); CloseHandle(t.handle); }
 	}
@@ -65,14 +68,14 @@ static if(threadingSupported) {
 	}
 
 	version(PthreadBackend) {
-		private extern(C) void* closureTrampoline(F, Args...)(void* arg) @nogc nothrow {
+		private extern(C) void* closureTrampoline(F, Args...)(void* arg) {
 			auto closure = cast(Closure!(F, Args)*) arg;
 			closure.fn(closure.args);
 			fp.pointer.free(closure);
 			return null;
 		}
 	} else version(Windows) {
-		private extern(Windows) DWORD closureTrampoline(F, Args...)(void* arg) @nogc nothrow {
+		private extern(Windows) DWORD closureTrampoline(F, Args...)(void* arg) {
 			auto closure = cast(Closure!(F, Args)*) arg;
 			closure.fn(closure.args);
 			fp.pointer.free(closure);
@@ -82,7 +85,7 @@ static if(threadingSupported) {
 
 	// Spawns fn(args) on a new thread, boxing fn and a copy of args in a
 	// malloc'd closure that the trampoline frees after the call returns.
-	Thread create(F, Args...)(F fn, Args args) @trusted @nogc nothrow
+	Thread create(F, Args...)(F fn, Args args) @trusted
 	if(is(typeof(fn(args))) && !is(F == ThreadFunction)) {
 		alias C = Closure!(F, Args);
 		auto closure = fp.pointer.malloc!C(1);

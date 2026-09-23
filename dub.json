@@ -1,9 +1,6 @@
 {
   "name": "bc-threads",
   "description": "A minimal, -betterC-compatible fork-join thread pool for D",
-  "authors": [
-    "Joshua Dahl"
-  ],
   "targetType": "staticLibrary",
   "sourcePaths": [
     "source"
@@ -14,7 +11,7 @@
   "dependencies": {
     "libfp": {
       "repository": "git+https://github.com/doir-lang/libfp.git",
-      "version": "674acd77c2b8411144c2e162015145df7edcf1a0"
+      "version": "5eb55054b0883c103bedabd8a8e7bb0898d9c465"
     }
   },
   "dflags-ldc": [

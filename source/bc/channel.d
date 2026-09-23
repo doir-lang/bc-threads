@@ -32,10 +32,10 @@ static if(threadingSupported) {
 		shared ptrdiff_t receiversWaiting = 0;
 	}
 
-	private void acquire(T)(Channel!T* ch) @trusted @nogc nothrow { bc.mutex.writeLock(ch.lock); }
-	private void release(T)(Channel!T* ch) @trusted @nogc nothrow { bc.mutex.writeUnlock(ch.lock); }
+	private void acquire(T)(Channel!T* ch) @trusted { bc.mutex.writeLock(ch.lock); }
+	private void release(T)(Channel!T* ch) @trusted { bc.mutex.writeUnlock(ch.lock); }
 
-	Channel!T* create(T)(size_t capacity) @trusted @nogc nothrow {
+	Channel!T* create(T)(size_t capacity) @trusted {
 		assert(capacity > 0);
 		auto ch = fp.pointer.malloc!(Channel!T)(1);
 		*ch = Channel!T.init;
@@ -48,31 +48,25 @@ static if(threadingSupported) {
 		return ch;
 	}
 
-	size_t capacity(T)(const Channel!T* ch) @nogc nothrow { return ch.capacity; }
+	size_t capacity(T)(const Channel!T* ch) { return ch.capacity; }
 
-	size_t length(T)(Channel!T* ch) @trusted @nogc nothrow {
+	size_t length(T)(Channel!T* ch) @trusted {
 		acquire(ch);
 		immutable n = ch.count;
 		release(ch);
 		return n;
 	}
 
-	bool isClosed(T)(const Channel!T* ch) @trusted @nogc nothrow { return atomicLoad(ch.closed); }
+	bool isClosed(T)(const Channel!T* ch) @trusted { return atomicLoad(ch.closed); }
 
-	bool send(T)(Channel!T* ch, T value) @trusted @nogc nothrow {
+	bool send(T)(Channel!T* ch, T value) @trusted {
 		immutable dynamic = ch.capacity == dynamicExtent;
 		while(true) {
 			acquire(ch);
 			if(atomicLoad(ch.closed)) { release(ch); return false; }
-			if(dynamic) {
-				fp.dynarray.pushBack(ch.buffer, value);
-				ch.count++;
-				release(ch);
-				bc.semaphore.post(ch.itemAvailable);
-				return true;
-			}
-			if(ch.count < ch.capacity) {
-				ch.buffer[(ch.head + ch.count) % ch.capacity] = value;
+			if(dynamic || ch.count < ch.capacity) {
+				if(dynamic) fp.dynarray.pushBack(ch.buffer, value);
+				else ch.buffer[(ch.head + ch.count) % ch.capacity] = value;
 				ch.count++;
 				release(ch);
 				bc.semaphore.post(ch.itemAvailable);
@@ -85,7 +79,7 @@ static if(threadingSupported) {
 		}
 	}
 
-	Nullable!T receive(T)(Channel!T* ch) @trusted @nogc nothrow {
+	Nullable!T receive(T)(Channel!T* ch) @trusted {
 		immutable dynamic = ch.capacity == dynamicExtent;
 		while(true) {
 			acquire(ch);
@@ -111,7 +105,7 @@ static if(threadingSupported) {
 		}
 	}
 
-	void close(T)(Channel!T* ch) @trusted @nogc nothrow {
+	void close(T)(Channel!T* ch) @trusted {
 		acquire(ch);
 		atomicStore(ch.closed, true);
 		immutable senders = atomicLoad(ch.sendersWaiting);
@@ -121,7 +115,7 @@ static if(threadingSupported) {
 		foreach(_; 0 .. receivers) bc.semaphore.post(ch.itemAvailable);
 	}
 
-	void free(T)(Channel!T* ch) @trusted @nogc nothrow {
+	void free(T)(Channel!T* ch) @trusted {
 		if(ch is null) return;
 		if(!isClosed(ch)) close(ch);
 		bc.semaphore.free(ch.itemAvailable);
@@ -144,7 +138,7 @@ static if(threadingSupported) {
 		bool closed = false;
 	}
 
-	Channel!T* create(T)(size_t capacity) @trusted @nogc nothrow {
+	Channel!T* create(T)(size_t capacity) @trusted {
 		assert(capacity > 0);
 		auto ch = fp.pointer.malloc!(Channel!T)(1);
 		*ch = Channel!T.init;
@@ -154,26 +148,26 @@ static if(threadingSupported) {
 		return ch;
 	}
 
-	size_t capacity(T)(const Channel!T* ch) @nogc nothrow { return ch.capacity; }
-	size_t length(T)(Channel!T* ch) @trusted @nogc nothrow { return fp.dynarray.length(ch.buffer); }
-	bool isClosed(T)(const Channel!T* ch) @nogc nothrow { return ch.closed; }
+	size_t capacity(T)(const Channel!T* ch) { return ch.capacity; }
+	size_t length(T)(Channel!T* ch) @trusted { return fp.dynarray.length(ch.buffer); }
+	bool isClosed(T)(const Channel!T* ch) { return ch.closed; }
 
-	bool send(T)(Channel!T* ch, T value) @trusted @nogc nothrow {
+	bool send(T)(Channel!T* ch, T value) @trusted {
 		if(ch.closed) return false;
 		fp.dynarray.pushBack(ch.buffer, value);
 		return true;
 	}
 
-	Nullable!T receive(T)(Channel!T* ch) @trusted @nogc nothrow {
+	Nullable!T receive(T)(Channel!T* ch) @trusted {
 		if(fp.dynarray.length(ch.buffer) == 0) return Nullable!T.init;
 		T value = *fp.dynarray.front(ch.buffer);
 		fp.dynarray.removeAt(ch.buffer, 0);
 		return nullable(value);
 	}
 
-	void close(T)(Channel!T* ch) @nogc nothrow { ch.closed = true; }
+	void close(T)(Channel!T* ch) { ch.closed = true; }
 
-	void free(T)(Channel!T* ch) @trusted @nogc nothrow {
+	void free(T)(Channel!T* ch) @trusted {
 		if(ch is null) return;
 		fp.dynarray.free(ch.buffer);
 		fp.pointer.free(ch);

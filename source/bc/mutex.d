@@ -7,11 +7,10 @@ import fp.pointer;
 
 mixin(PthreadBackendMixin);
 
-version(linux) {
-	import core.sys.posix.pthread : pthread_rwlock_t, pthread_rwlock_init, pthread_rwlock_destroy,
-		pthread_rwlock_rdlock, pthread_rwlock_tryrdlock, pthread_rwlock_wrlock, pthread_rwlock_trywrlock,
-		pthread_rwlock_unlock;
-} else version(OSX) {
+// Not `version(PthreadBackend)`: imports are resolved before the string mixin
+// that declares that identifier has run. `Posix` selects the same platforms
+// this module has a pthread backend for.
+version(Posix) {
 	import core.sys.posix.pthread : pthread_rwlock_t, pthread_rwlock_init, pthread_rwlock_destroy,
 		pthread_rwlock_rdlock, pthread_rwlock_tryrdlock, pthread_rwlock_wrlock, pthread_rwlock_trywrlock,
 		pthread_rwlock_unlock;
@@ -21,7 +20,7 @@ version(linux) {
 	// SRWLOCK is not exposed by druntime's windows bindings, so declare the
 	// slim reader/writer lock API (synchapi.h, kernel32.dll) ourselves.
 	private struct SRWLOCK { void* ptr = null; }
-	extern(Windows) @nogc nothrow private {
+	extern(Windows) private {
 		void InitializeSRWLock(SRWLOCK*);
 		void AcquireSRWLockShared(SRWLOCK*);
 		BOOLEAN TryAcquireSRWLockShared(SRWLOCK*);
@@ -43,7 +42,7 @@ static if(threadingSupported) {
 	// init time, so moving/copying an initialized one to a different address
 	// (e.g. returning it by value into a caller-owned field) corrupts it and
 	// every subsequent lock call blocks forever.
-	Mutex* create() @trusted @nogc nothrow {
+	Mutex* create() @trusted {
 		auto m = fp.pointer.malloc!Mutex(1);
 		*m = Mutex.init;
 		version(PthreadBackend) pthread_rwlock_init(&m.handle, null);
@@ -51,38 +50,38 @@ static if(threadingSupported) {
 		return m;
 	}
 
-	void free(Mutex* m) @trusted @nogc nothrow {
+	void free(Mutex* m) @trusted {
 		version(PthreadBackend) pthread_rwlock_destroy(&m.handle);
 		else version(Windows) {}
 		fp.pointer.free(m);
 	}
 
-	bool tryReadLock(Mutex* m) @trusted @nogc nothrow {
+	bool tryReadLock(Mutex* m) @trusted {
 		version(PthreadBackend) return pthread_rwlock_tryrdlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockShared(&m.handle) != 0;
 	}
 
-	void readLock(Mutex* m) @trusted @nogc nothrow {
+	void readLock(Mutex* m) @trusted {
 		version(PthreadBackend) pthread_rwlock_rdlock(&m.handle);
 		else version(Windows) AcquireSRWLockShared(&m.handle);
 	}
 
-	void readUnlock(Mutex* m) @trusted @nogc nothrow {
+	void readUnlock(Mutex* m) @trusted {
 		version(PthreadBackend) pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockShared(&m.handle);
 	}
 
-	bool tryWriteLock(Mutex* m) @trusted @nogc nothrow {
+	bool tryWriteLock(Mutex* m) @trusted {
 		version(PthreadBackend) return pthread_rwlock_trywrlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockExclusive(&m.handle) != 0;
 	}
 
-	void writeLock(Mutex* m) @trusted @nogc nothrow {
+	void writeLock(Mutex* m) @trusted {
 		version(PthreadBackend) pthread_rwlock_wrlock(&m.handle);
 		else version(Windows) AcquireSRWLockExclusive(&m.handle);
 	}
 
-	void writeUnlock(Mutex* m) @trusted @nogc nothrow {
+	void writeUnlock(Mutex* m) @trusted {
 		version(PthreadBackend) pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockExclusive(&m.handle);
 	}
@@ -95,15 +94,15 @@ static if(threadingSupported) {
 
 	struct Mutex { shared int state = 0; }
 
-	Mutex* create() @trusted @nogc nothrow {
+	Mutex* create() @trusted {
 		auto m = fp.pointer.malloc!Mutex(1);
 		*m = Mutex.init;
 		return m;
 	}
 
-	void free(Mutex* m) @trusted @nogc nothrow { fp.pointer.free(m); }
+	void free(Mutex* m) @trusted { fp.pointer.free(m); }
 
-	bool tryReadLock(Mutex* m) @trusted @nogc nothrow {
+	bool tryReadLock(Mutex* m) @trusted {
 		int cur = atomicLoad(m.state);
 		while(cur >= 0) {
 			if(cas(&m.state, cur, cur + 1)) return true;
@@ -112,23 +111,23 @@ static if(threadingSupported) {
 		return false;
 	}
 
-	void readLock(Mutex* m) @nogc nothrow {
+	void readLock(Mutex* m) {
 		while(!tryReadLock(m)) {}
 	}
 
-	void readUnlock(Mutex* m) @trusted @nogc nothrow {
+	void readUnlock(Mutex* m) @trusted {
 		atomicOp!"-="(m.state, 1);
 	}
 
-	bool tryWriteLock(Mutex* m) @trusted @nogc nothrow {
+	bool tryWriteLock(Mutex* m) @trusted {
 		return cas(&m.state, 0, -1);
 	}
 
-	void writeLock(Mutex* m) @nogc nothrow {
+	void writeLock(Mutex* m) {
 		while(!tryWriteLock(m)) {}
 	}
 
-	void writeUnlock(Mutex* m) @trusted @nogc nothrow {
+	void writeUnlock(Mutex* m) @trusted {
 		atomicStore(m.state, 0);
 	}
 

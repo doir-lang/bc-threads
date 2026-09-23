@@ -45,7 +45,7 @@ static if (threadingSupported) {
 		private size_t count = 0;
 	}
 
-	private Job claimJob(ThreadPool* pool) @trusted @nogc nothrow {
+	private Job claimJob(ThreadPool* pool) @trusted {
 		bc.mutex.writeLock(pool.queueLock);
 		Job job = *fp.dynarray.back(pool.queue);
 		fp.dynarray.popBack(pool.queue);
@@ -53,7 +53,7 @@ static if (threadingSupported) {
 		return job;
 	}
 
-	private void workerLoop(ThreadPool* pool) @trusted @nogc nothrow {
+	private void workerLoop(ThreadPool* pool) @trusted {
 		while (true) {
 			bc.semaphore.wait(pool.wake);
 			if (atomicLoad(pool.stopping)) return;
@@ -65,18 +65,18 @@ static if (threadingSupported) {
 	}
 
 	version (PthreadBackend) {
-		extern (C) private void* workerMain(void* arg) @nogc nothrow {
+		extern (C) private void* workerMain(void* arg) {
 			workerLoop(cast(ThreadPool*) arg);
 			return null;
 		}
 	} else version (Windows) {
-		extern (Windows) private DWORD workerMain(void* arg) @nogc nothrow {
+		extern (Windows) private DWORD workerMain(void* arg) {
 			workerLoop(cast(ThreadPool*) arg);
 			return 0;
 		}
 	}
 
-	ThreadPool* create(size_t workerCount = 0) @trusted @nogc nothrow {
+	ThreadPool* create(size_t workerCount = 0) @trusted {
 		auto pool = fp.pointer.malloc!ThreadPool(1);
 		*pool = ThreadPool.init;
 		pool.count = workerCount > 0 ? workerCount : hardwareConcurrency();
@@ -91,13 +91,13 @@ static if (threadingSupported) {
 		return pool;
 	}
 
-	size_t workerCount(const ThreadPool* pool) @nogc nothrow { return pool.count; }
+	size_t workerCount(const ThreadPool* pool) { return pool.count; }
 
-	size_t pendingJobs(const ThreadPool* pool) @trusted @nogc nothrow {
+	size_t pendingJobs(const ThreadPool* pool) @trusted {
 		return cast(size_t) atomicLoad(pool.outstanding);
 	}
 
-	void submit(ThreadPool* pool, scope Job[] jobs) @trusted @nogc nothrow {
+	void submit(ThreadPool* pool, scope Job[] jobs) @trusted {
 		if (jobs.length == 0) return;
 
 		bc.mutex.writeLock(pool.queueLock);
@@ -108,21 +108,21 @@ static if (threadingSupported) {
 		foreach (_; 0 .. jobs.length) bc.semaphore.post(pool.wake);
 	}
 
-	void wait(ThreadPool* pool) @trusted @nogc nothrow {
+	void wait(ThreadPool* pool) @trusted {
 		while (atomicLoad(pool.outstanding) > 0) bc.semaphore.wait(pool.done);
 	}
 
-	void waitJobCount(ThreadPool* pool, size_t count) @trusted @nogc nothrow {
+	void waitJobCount(ThreadPool* pool, size_t count) @trusted {
 		while (atomicLoad(pool.outstanding) > cast(ptrdiff_t) count) {}
 	}
 
-	void run(ThreadPool* pool, scope Job[] jobs) @trusted @nogc nothrow {
+	void run(ThreadPool* pool, scope Job[] jobs) @trusted {
 		immutable pending = pendingJobs(pool);
 		submit(pool, jobs);
 		waitJobCount(pool, pending);
 	}
 
-	void free(ThreadPool* pool) @trusted @nogc nothrow {
+	void free(ThreadPool* pool) @trusted {
 		if (pool is null || pool.handles is null) return;
 		atomicStore(pool.stopping, true);
 		foreach (i; 0 .. pool.count) bc.semaphore.post(pool.wake);
@@ -139,27 +139,27 @@ static if (threadingSupported) {
 
 	struct ThreadPool {}
 
-	ThreadPool* create(size_t workerCount = 0) @trusted @nogc nothrow {
+	ThreadPool* create(size_t workerCount = 0) @trusted {
 		return fp.pointer.malloc!ThreadPool(1);
 	}
 
-	size_t workerCount(const ThreadPool* pool) @nogc nothrow { return 1; }
+	size_t workerCount(const ThreadPool* pool) { return 1; }
 
-	size_t pendingJobs(const ThreadPool* pool) @nogc nothrow { return 0; }
+	size_t pendingJobs(const ThreadPool* pool) { return 0; }
 
-	void submit(ThreadPool* pool, scope Job[] jobs) @nogc nothrow {
+	void submit(ThreadPool* pool, scope Job[] jobs) {
 		foreach (ref job; jobs) job.fn(job.arg);
 	}
 
-	void wait(ThreadPool* pool) @nogc nothrow {}
+	void wait(ThreadPool* pool) {}
 
-	void waitJobCount(ThreadPool* pool, size_t count) @nogc nothrow {}
+	void waitJobCount(ThreadPool* pool, size_t count) {}
 
-	void run(ThreadPool* pool, scope Job[] jobs) @nogc nothrow {
+	void run(ThreadPool* pool, scope Job[] jobs) {
 		submit(pool, jobs);
 	}
 
-	void free(ThreadPool* pool) @trusted @nogc nothrow {
+	void free(ThreadPool* pool) @trusted {
 		fp.pointer.free(pool);
 	}
 }
