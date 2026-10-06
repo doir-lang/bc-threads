@@ -88,11 +88,12 @@ static if(threadingSupported) {
 
 } else {
 
-	// No OS lock primitives available on this platform - fall back to a
-	// busy-wait spinlock built on plain atomics.
-	import core.atomic : atomicOp, atomicLoad, atomicStore, cas;
+	// No OS lock primitives available on this platform - fall back to
+	// bc.spinlock, which busy-waits on plain atomics.
+	import bc.spinlock : SpinLock;
+	static import bc.spinlock;
 
-	struct Mutex { shared int state = 0; }
+	alias Mutex = SpinLock;
 
 	Mutex* create() @trusted {
 		auto m = fp.pointer.malloc!Mutex(1);
@@ -102,34 +103,12 @@ static if(threadingSupported) {
 
 	void free(Mutex* m) @trusted { fp.pointer.free(m); }
 
-	bool tryReadLock(Mutex* m) @trusted {
-		int cur = atomicLoad(m.state);
-		while(cur >= 0) {
-			if(cas(&m.state, cur, cur + 1)) return true;
-			cur = atomicLoad(m.state);
-		}
-		return false;
-	}
-
-	void readLock(Mutex* m) {
-		while(!tryReadLock(m)) {}
-	}
-
-	void readUnlock(Mutex* m) @trusted {
-		atomicOp!"-="(m.state, 1);
-	}
-
-	bool tryWriteLock(Mutex* m) @trusted {
-		return cas(&m.state, 0, -1);
-	}
-
-	void writeLock(Mutex* m) {
-		while(!tryWriteLock(m)) {}
-	}
-
-	void writeUnlock(Mutex* m) @trusted {
-		atomicStore(m.state, 0);
-	}
+	bool tryReadLock(Mutex* m) @trusted { return bc.spinlock.tryReadLock(*m); }
+	void readLock(Mutex* m) @trusted { bc.spinlock.readLock(*m); }
+	void readUnlock(Mutex* m) @trusted { bc.spinlock.readUnlock(*m); }
+	bool tryWriteLock(Mutex* m) @trusted { return bc.spinlock.tryWriteLock(*m); }
+	void writeLock(Mutex* m) @trusted { bc.spinlock.writeLock(*m); }
+	void writeUnlock(Mutex* m) @trusted { bc.spinlock.writeUnlock(*m); }
 
 }
 

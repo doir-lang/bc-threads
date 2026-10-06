@@ -11,14 +11,20 @@ the module doc comment in
 notes (queue ownership, reentrant `submit`, why a job must never call
 `wait` on itself, etc).
 
+Alongside the pool: `bc.mutex` (a reader-writer lock), `bc.semaphore`,
+`bc.channel`, `bc.thread`, and `bc.spinlock`, a reader-writer spinlock whose
+`.init` is unlocked, so a `__gshared` one needs no `create` or lazy
+initialization. On platforms without OS locks, `bc.mutex` falls back to it.
+
 ## Building
 
 ```sh
-dub build --config=library   # static library
-dub test                     # build and run the unittests
+dub build --config=library --compiler=ldc2   # static library
+dub test --compiler=ldc2                     # build and run the unittests
 ```
 
-Works with both LDC and DMD (`--compiler=ldc2` / `--compiler=dmd`).
+LDC only: libfp, which this depends on, refuses DMD at compile time (see
+its README, including the analysis-only `FpAllowDMD` escape hatch).
 
 ## Testing
 
@@ -40,7 +46,6 @@ and run such a configuration directly instead.
 ```sh
 tools/coverage.sh        # per-module summary
 tools/coverage.sh -v     # ... and every uncovered line
-DC=dmd tools/coverage.sh # measure with DMD instead of the default LDC
 ```
 
 `-cov` records its line counts through druntime, which `-betterC` does not

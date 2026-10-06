@@ -18,6 +18,7 @@ private enum modules = [
 	"bc.thread",
 	"bc.semaphore",
 	"bc.mutex",
+	"bc.spinlock",
 ];
 
 private int runEveryTest() {
