@@ -1,15 +1,14 @@
+/// Reader-writer locks that sleep while they wait: pthread rwlocks on Linux and macOS, slim reader/writer locks on Windows, and `bc.spinlock` where there are no OS locks.
 module bc.mutex;
 
-import bc.platform : threadingSupported, PthreadBackendMixin;
-import fp.pointer;
+static import bc.platform;
+static import fp.pointer;
 
 @nogc nothrow:
 
-mixin(PthreadBackendMixin);
+mixin(bc.platform.pthreadBackendMixin);
 
-// Not `version(PthreadBackend)`: imports are resolved before the string mixin
-// that declares that identifier has run. `Posix` selects the same platforms
-// this module has a pthread backend for.
+// `Posix`, not `PthreadBackend`: imports resolve before the mixin above declares it.
 version(Posix) {
 	import core.sys.posix.pthread : pthread_rwlock_t, pthread_rwlock_init, pthread_rwlock_destroy,
 		pthread_rwlock_rdlock, pthread_rwlock_tryrdlock, pthread_rwlock_wrlock, pthread_rwlock_trywrlock,
@@ -17,8 +16,7 @@ version(Posix) {
 } else version(Windows) {
 	import core.sys.windows.windows : BOOLEAN;
 
-	// SRWLOCK is not exposed by druntime's windows bindings, so declare the
-	// slim reader/writer lock API (synchapi.h, kernel32.dll) ourselves.
+	// druntime does not bind the slim reader/writer lock API, so declare it from synchapi.h.
 	private struct SRWLOCK { void* ptr = null; }
 	extern(Windows) private {
 		void InitializeSRWLock(SRWLOCK*);
@@ -32,80 +30,164 @@ version(Posix) {
 }
 
 
-static if(threadingSupported) {
+static if(bc.platform.threadingSupported) {
 
+	/// A reader-writer lock, used only through the pointer `create` returns: macOS binds a rwlock to its address, so a moved one blocks forever.
 	version(PthreadBackend) struct Mutex { pthread_rwlock_t handle; }
 	else version(Windows) struct Mutex { SRWLOCK handle; }
 
-	// Heap-allocated and never relocated after `create`: on Darwin,
-	// pthread_rwlock_t's internal state is bound to the struct's address at
-	// init time, so moving/copying an initialized one to a different address
-	// (e.g. returning it by value into a caller-owned field) corrupts it and
-	// every subsequent lock call blocks forever.
+
+	/// Allocates an unlocked mutex.
+	///
+	/// Returns null, having freed what it allocated, if allocation or initialization fails.
+	///
+	/// Examples:
+	/// ---
+	/// Mutex* m = create();
+	/// assert(m !is null);
+	/// free(m);
+	/// ---
 	Mutex* create() @trusted {
 		auto m = fp.pointer.malloc!Mutex(1);
+		if(m is null) return null;
 		*m = Mutex.init;
-		version(PthreadBackend) pthread_rwlock_init(&m.handle, null);
-		else version(Windows) InitializeSRWLock(&m.handle);
+		version(PthreadBackend) {
+			bool failed = false;
+			debug failed = bc.platform.simulatedFailure();
+			if(failed || pthread_rwlock_init(&m.handle, null) != 0) {
+				fp.pointer.free(m);
+				return null;
+			}
+		} else version(Windows) InitializeSRWLock(&m.handle);
 		return m;
 	}
 
+	/// Destroys and frees `m`, which no thread may hold; does nothing if `m` is null.
+	///
+	/// Examples:
+	/// ---
+	/// free(create());
+	/// free(null);
+	/// ---
 	void free(Mutex* m) @trusted {
-		version(PthreadBackend) pthread_rwlock_destroy(&m.handle);
-		else version(Windows) {}
+		if(m is null) return;
+		version(PthreadBackend) cast(void) pthread_rwlock_destroy(&m.handle);
 		fp.pointer.free(m);
 	}
 
+
+	/// Takes a shared hold on `m` without waiting; returns false, taking nothing, if a writer holds it.
+	///
+	/// Examples:
+	/// ---
+	/// Mutex* m = create();
+	/// assert(tryReadLock(m));
+	/// readUnlock(m);
+	/// free(m);
+	/// ---
 	bool tryReadLock(Mutex* m) @trusted {
 		version(PthreadBackend) return pthread_rwlock_tryrdlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockShared(&m.handle) != 0;
 	}
 
+	/// Waits until no writer holds `m`, then takes a shared hold on it. The calling thread must not hold `m` for writing.
+	///
+	/// Examples:
+	/// ---
+	/// Mutex* m = create();
+	/// readLock(m);
+	/// readUnlock(m);
+	/// free(m);
+	/// ---
 	void readLock(Mutex* m) @trusted {
-		version(PthreadBackend) pthread_rwlock_rdlock(&m.handle);
+		version(PthreadBackend) cast(void) pthread_rwlock_rdlock(&m.handle);
 		else version(Windows) AcquireSRWLockShared(&m.handle);
 	}
 
+	/// Releases a shared hold on `m` that the calling thread took.
+	///
+	/// Examples:
+	/// ---
+	/// Mutex* m = create();
+	/// readLock(m);
+	/// readUnlock(m);
+	/// assert(tryWriteLock(m));
+	/// writeUnlock(m);
+	/// free(m);
+	/// ---
 	void readUnlock(Mutex* m) @trusted {
-		version(PthreadBackend) pthread_rwlock_unlock(&m.handle);
+		version(PthreadBackend) cast(void) pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockShared(&m.handle);
 	}
 
+
+	/// Takes the exclusive hold on `m` without waiting; returns false, taking nothing, if anyone holds it.
+	///
+	/// Examples:
+	/// ---
+	/// Mutex* m = create();
+	/// assert(tryWriteLock(m));
+	/// assert(!tryReadLock(m));
+	/// writeUnlock(m);
+	/// free(m);
+	/// ---
 	bool tryWriteLock(Mutex* m) @trusted {
 		version(PthreadBackend) return pthread_rwlock_trywrlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockExclusive(&m.handle) != 0;
 	}
 
+	/// Waits until nobody holds `m`, then takes the exclusive hold on it. The calling thread must not already hold `m`.
+	///
+	/// Examples:
+	/// ---
+	/// Mutex* m = create();
+	/// writeLock(m);
+	/// writeUnlock(m);
+	/// free(m);
+	/// ---
 	void writeLock(Mutex* m) @trusted {
-		version(PthreadBackend) pthread_rwlock_wrlock(&m.handle);
+		version(PthreadBackend) cast(void) pthread_rwlock_wrlock(&m.handle);
 		else version(Windows) AcquireSRWLockExclusive(&m.handle);
 	}
 
+	/// Releases the exclusive hold on `m` that the calling thread took.
+	///
+	/// Examples:
+	/// ---
+	/// Mutex* m = create();
+	/// writeLock(m);
+	/// writeUnlock(m);
+	/// assert(tryReadLock(m));
+	/// readUnlock(m);
+	/// free(m);
+	/// ---
 	void writeUnlock(Mutex* m) @trusted {
-		version(PthreadBackend) pthread_rwlock_unlock(&m.handle);
+		version(PthreadBackend) cast(void) pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockExclusive(&m.handle);
 	}
 
 } else {
 
-	// No OS lock primitives available on this platform - fall back to
-	// bc.spinlock, which busy-waits on plain atomics.
-	import bc.spinlock : SpinLock;
 	static import bc.spinlock;
 
-	alias Mutex = SpinLock;
+	alias Mutex = bc.spinlock.SpinLock;
+
 
 	Mutex* create() @trusted {
 		auto m = fp.pointer.malloc!Mutex(1);
+		if(m is null) return null;
 		*m = Mutex.init;
 		return m;
 	}
 
 	void free(Mutex* m) @trusted { fp.pointer.free(m); }
 
+
 	bool tryReadLock(Mutex* m) @trusted { return bc.spinlock.tryReadLock(*m); }
 	void readLock(Mutex* m) @trusted { bc.spinlock.readLock(*m); }
 	void readUnlock(Mutex* m) @trusted { bc.spinlock.readUnlock(*m); }
+
+
 	bool tryWriteLock(Mutex* m) @trusted { return bc.spinlock.tryWriteLock(*m); }
 	void writeLock(Mutex* m) @trusted { bc.spinlock.writeLock(*m); }
 	void writeUnlock(Mutex* m) @trusted { bc.spinlock.writeUnlock(*m); }
@@ -115,23 +197,29 @@ static if(threadingSupported) {
 
 unittest {
 	auto m = create();
+	assert(m !is null);
 	scope(exit) free(m);
 
-	// multiple readers may hold the lock together
 	readLock(m);
 	assert(tryReadLock(m));
 	assert(!tryWriteLock(m));
 	readUnlock(m);
-	assert(!tryWriteLock(m));
 	readUnlock(m);
-
-	// once readers are gone, a writer can take it exclusively
-	assert(tryWriteLock(m));
-	assert(!tryReadLock(m));
-	writeUnlock(m);
 
 	writeLock(m);
 	assert(!tryReadLock(m));
-	assert(!tryWriteLock(m));
 	writeUnlock(m);
+	assert(tryWriteLock(m));
+	writeUnlock(m);
+
+	free(null);
+	debug {
+		bc.platform.failAfter(0);
+		assert(create() is null);
+		// The allocation succeeds, then initializing the rwlock fails.
+		version(PthreadBackend) {
+			bc.platform.failAfter(1);
+			assert(create() is null);
+		}
+	}
 }

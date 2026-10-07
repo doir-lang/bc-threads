@@ -1,3 +1,4 @@
+/// Imports every `bc` module.
 module bc;
 
 public import bc.channel;

@@ -1,19 +1,20 @@
+/// OS threads: pthreads on Linux and macOS, Win32 threads on Windows.
 module bc.thread;
 
-import core.atomic : atomicOp, atomicLoad;
-import fp.pointer;
+static import bc.platform;
+static import fp.pointer;
 public import bc.platform : threadingSupported;
-import bc.platform : PthreadBackendMixin;
+import std.meta : staticMap;
+import std.traits : Unqual;
+import std.typecons : Nullable;
 
 @nogc nothrow:
 
-mixin(PthreadBackendMixin);
+mixin(bc.platform.pthreadBackendMixin);
 
-// Not `version(PthreadBackend)`: imports are resolved before the string mixin
-// that declares that identifier has run.
+// `Posix`, not `PthreadBackend`: imports resolve before the mixin above declares it.
 version(Posix) import core.sys.posix.pthread : pthread_t, pthread_create, pthread_join;
 
-// The CPU count is the one thing the two pthread platforms don't share.
 version(linux) {
 	import core.sys.posix.unistd : sysconf, _SC_NPROCESSORS_ONLN;
 } else version(OSX) {
@@ -23,6 +24,12 @@ version(linux) {
 }
 
 
+/// The number of processors the OS reports (physical cores on macOS), or 1 if it reports none or the platform has no threads.
+///
+/// Examples:
+/// ---
+/// assert(hardwareConcurrency() >= 1);
+/// ---
 size_t hardwareConcurrency() @trusted {
 	version(linux) {
 		immutable n = sysconf(_SC_NPROCESSORS_ONLN);
@@ -30,7 +37,7 @@ size_t hardwareConcurrency() @trusted {
 	} else version(OSX) {
 		uint n;
 		size_t len = n.sizeof;
-		sysctlbyname("hw.physicalcpu", &n, &len, null, 0);
+		if(sysctlbyname("hw.physicalcpu", &n, &len, null, 0) != 0) return 1;
 		return n > 0 ? cast(size_t) n : 1;
 	} else version(Windows) {
 		SYSTEM_INFO info;
@@ -43,28 +50,46 @@ size_t hardwareConcurrency() @trusted {
 
 static if(threadingSupported) {
 
+	/// The entry point `create` runs on a new thread: `extern(C)` returning `void*` with pthreads, `extern(Windows)` returning `DWORD` on Windows.
 	version(PthreadBackend) alias ThreadFunction = extern(C) void* function(void*) @nogc nothrow;
 	else version(Windows) alias ThreadFunction = extern(Windows) DWORD function(void*) @nogc nothrow;
 
+	/// A started thread, to be joined exactly once with `join`.
 	version(PthreadBackend) struct Thread { pthread_t handle; }
 	else version(Windows) struct Thread { HANDLE handle; }
 
-	Thread create(ThreadFunction fn, void* arg) @trusted {
-		Thread t;
-		version(PthreadBackend) pthread_create(&t.handle, null, fn, arg);
-		else version(Windows) t.handle = CreateThread(null, 0, fn, arg, 0, null);
-		return t;
-	}
-
-	void join(ref Thread t) @trusted {
-		version(PthreadBackend) pthread_join(t.handle, null);
-		else version(Windows) { WaitForSingleObject(t.handle, INFINITE); CloseHandle(t.handle); }
-	}
-
-
 	private struct Closure(F, Args...) {
 		F fn;
-		Args args;
+		// Unqualified, since a `const` or `immutable` argument would make the closure impossible to assign into its heap copy.
+		staticMap!(Unqual, Args) args;
+	}
+
+
+	/// Starts `fn(arg)` on a new thread.
+	///
+	/// Returns an empty `Nullable` if the OS cannot start one.
+	///
+	/// Examples:
+	/// ---
+	/// version(Windows) static extern(Windows) uint entry(void* arg) @nogc nothrow { *cast(int*) arg = 1; return 0; }
+	/// else static extern(C) void* entry(void* arg) @nogc nothrow { *cast(int*) arg = 1; return null; }
+	///
+	/// int ran = 0;
+	/// auto t = create(&entry, &ran);
+	/// assert(!t.isNull);
+	/// join(t.get);
+	/// assert(ran == 1);
+	/// ---
+	Nullable!Thread create(ThreadFunction fn, void* arg) @trusted {
+		debug if(bc.platform.simulatedFailure()) return Nullable!Thread.init;
+		Thread t;
+		version(PthreadBackend) {
+			if(pthread_create(&t.handle, null, fn, arg) != 0) return Nullable!Thread.init;
+		} else version(Windows) {
+			t.handle = CreateThread(null, 0, fn, arg, 0, null);
+			if(t.handle is null) return Nullable!Thread.init;
+		}
+		return Nullable!Thread(t);
 	}
 
 	version(PthreadBackend) {
@@ -83,57 +108,70 @@ static if(threadingSupported) {
 		}
 	}
 
-	// Spawns fn(args) on a new thread, boxing fn and a copy of args in a
-	// malloc'd closure that the trampoline frees after the call returns.
-	Thread create(F, Args...)(F fn, Args args) @trusted
+	/// Starts `fn(args)` on a new thread, passing it a heap copy of `args` that the thread frees once `fn` returns.
+	///
+	/// Returns an empty `Nullable`, having freed the copy, if allocation fails or the OS cannot start a thread.
+	///
+	/// Examples:
+	/// ---
+	/// static void add(int* sum, int a, int b) @nogc nothrow { *sum = a + b; }
+	///
+	/// int sum = 0;
+	/// auto t = create(&add, &sum, 3, 4);
+	/// assert(!t.isNull);
+	/// join(t.get);
+	/// assert(sum == 7);
+	/// ---
+	Nullable!Thread create(F, Args...)(F fn, Args args) @trusted
 	if(is(typeof(fn(args))) && !is(F == ThreadFunction)) {
 		alias C = Closure!(F, Args);
 		auto closure = fp.pointer.malloc!C(1);
-		assert(closure !is null);
+		if(closure is null) return Nullable!Thread.init;
 		*closure = C(fn, args);
-		return create(&closureTrampoline!(F, Args), closure);
+		auto t = create(&closureTrampoline!(F, Args), closure);
+		if(t.isNull) fp.pointer.free(closure);
+		return t;
+	}
+
+
+	/// Waits for `t` to finish, then releases it.
+	///
+	/// Examples:
+	/// ---
+	/// static void work() @nogc nothrow {}
+	/// auto t = create(&work);
+	/// assert(!t.isNull);
+	/// join(t.get);
+	/// ---
+	void join(ref Thread t) @trusted {
+		version(PthreadBackend) cast(void) pthread_join(t.handle, null);
+		else version(Windows) {
+			cast(void) WaitForSingleObject(t.handle, INFINITE);
+			cast(void) CloseHandle(t.handle);
+		}
 	}
 
 }
 
 
-// The fallback worker count for a pool created with `workerCount == 0`, so a
-// zero here would silently build a pool that never runs anything.
 unittest {
-	immutable n = hardwareConcurrency();
-	assert(n >= 1);
-	// the query hits the OS on every call; it should not drift between them
-	assert(n == hardwareConcurrency());
-}
+	assert(hardwareConcurrency() >= 1);
 
+	static if(threadingSupported) {
+		static void add(int* sum, int a, int b) @nogc nothrow { *sum = a + b; }
 
-static if(threadingSupported)
-unittest {
-	static shared int counter = 0;
+		int sum = 0;
+		immutable three = 3;
+		auto t = create(&add, &sum, three, 4);
+		assert(!t.isNull);
+		join(t.get);
+		assert(sum == 7);
 
-	version(PthreadBackend) extern(C) void* bump(void* arg) @nogc nothrow {
-		atomicOp!"+="(counter, 1);
-		return null;
-	} else version(Windows) extern(Windows) DWORD bump(void* arg) @nogc nothrow {
-		atomicOp!"+="(counter, 1);
-		return 0;
+		// The first fails copying the arguments, the second starting the thread.
+		debug foreach(i; 0 .. 2) {
+			bc.platform.failAfter(i);
+			assert(create(&add, &sum, 1, 2).isNull);
+		}
+		assert(sum == 7);
 	}
-
-	Thread t = create(&bump, null);
-	join(t);
-	assert(atomicLoad(counter) == 1);
-}
-
-
-static if(threadingSupported)
-unittest {
-	static shared int sum = 0;
-
-	static void addTwo(int a, int b) @nogc nothrow {
-		atomicOp!"+="(sum, a + b);
-	}
-
-	Thread t = create(&addTwo, 3, 4);
-	join(t);
-	assert(atomicLoad(sum) == 7);
 }

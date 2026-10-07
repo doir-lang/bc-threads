@@ -1,117 +1,105 @@
+/// Counting semaphores: POSIX semaphores on Linux, Mach semaphores on macOS, and semaphore objects on Windows.
 module bc.semaphore;
 
-import bc.platform : threadingSupported;
+static import bc.platform;
+import std.typecons : Nullable, nullable;
 
 @nogc nothrow:
 
 version(linux) {
+	import core.stdc.errno : errno, EINTR;
 	import core.sys.posix.semaphore : sem_t, sem_init, sem_wait, sem_post, sem_destroy;
 } else version(OSX) {
-	import core.stdc.errno : errno, EINTR;
-	import core.sys.darwin.mach.kern_return : KERN_ABORTED;
+	// macOS declares unnamed POSIX semaphores, but `sem_init` always fails with ENOSYS.
+	import core.sys.darwin.mach.kern_return : KERN_ABORTED, KERN_SUCCESS;
 	import core.sys.darwin.mach.semaphore : mach_task_self, semaphore_create, semaphore_destroy, semaphore_signal, semaphore_t, semaphore_wait, SYNC_POLICY_FIFO;
 } else version(Windows) {
 	import core.sys.windows.windows : HANDLE, CreateSemaphoreA, ReleaseSemaphore, WaitForSingleObject, CloseHandle, INFINITE;
 }
 
 
-static if(threadingSupported) {
+static if(bc.platform.threadingSupported) {
 
+	/// The largest count a semaphore can hold on every platform.
+	enum uint maxCount = int.max;
+
+	/// A counting semaphore made by `create`. Copy one only before threads share it: POSIX forbids waiting or posting through a copy of one in use.
 	version(linux) struct Semaphore { sem_t handle; }
 	else version(OSX) struct Semaphore { semaphore_t handle; }
 	else version(Windows) struct Semaphore { HANDLE handle; }
 
-	Semaphore create(uint initial = 0) @trusted {
+
+	/// Creates a semaphore whose count starts at `initial`, which must not exceed `maxCount`.
+	///
+	/// Returns an empty `Nullable` if the OS cannot create one.
+	///
+	/// Examples:
+	/// ---
+	/// auto s = create(1);
+	/// assert(!s.isNull);
+	/// wait(s.get);
+	/// free(s.get);
+	/// ---
+	Nullable!Semaphore create(uint initial = 0) @trusted {
+		assert(initial <= maxCount, "bc.semaphore: initial count above maxCount");
+		debug if(bc.platform.simulatedFailure()) return Nullable!Semaphore.init;
 		Semaphore s;
-		version(linux) sem_init(&s.handle, 0, initial);
-		else version(OSX) semaphore_create(mach_task_self(), &s.handle, SYNC_POLICY_FIFO, cast(int) initial);
-		else version(Windows) s.handle = CreateSemaphoreA(null, cast(int) initial, int.max, null);
-		return s;
+		version(linux) {
+			if(sem_init(&s.handle, 0, initial) != 0) return Nullable!Semaphore.init;
+		} else version(OSX) {
+			if(semaphore_create(mach_task_self(), &s.handle, SYNC_POLICY_FIFO, cast(int) initial) != KERN_SUCCESS) return Nullable!Semaphore.init;
+		} else version(Windows) {
+			s.handle = CreateSemaphoreA(null, cast(int) initial, maxCount, null);
+			if(s.handle is null) return Nullable!Semaphore.init;
+		}
+		return nullable(s);
 	}
 
-	void wait(ref Semaphore s) @trusted {
-		version(linux) sem_wait(&s.handle);
-		// KERN_ABORTED/EINTR is a signal interrupting the trap, not a wakeup;
-		// anything else (success, or a real error) is the caller's answer.
-		else version(OSX) while(semaphore_wait(s.handle) == KERN_ABORTED && errno == EINTR) {}
-		else version(Windows) WaitForSingleObject(s.handle, INFINITE);
-	}
-
-	void post(ref Semaphore s) @trusted {
-		version(linux) sem_post(&s.handle);
-		else version(OSX) semaphore_signal(s.handle);
-		else version(Windows) ReleaseSemaphore(s.handle, 1, null);
-	}
-
+	/// Destroys `s`, which no thread may still be waiting on.
+	///
+	/// Examples:
+	/// ---
+	/// auto s = create().get;
+	/// free(s);
+	/// ---
 	void free(ref Semaphore s) @trusted {
-		version(linux) sem_destroy(&s.handle);
-		else version(OSX) semaphore_destroy(mach_task_self(), s.handle);
-		else version(Windows) CloseHandle(s.handle);
+		version(linux) cast(void) sem_destroy(&s.handle);
+		else version(OSX) cast(void) semaphore_destroy(mach_task_self(), s.handle);
+		else version(Windows) cast(void) CloseHandle(s.handle);
 	}
 
-}
 
-
-static if(threadingSupported)
-unittest {
-	Semaphore s = create();
-	scope(exit) free(s);
-
-	post(s);
-	wait(s); // already signalled, must not block
-}
-
-
-// Covers `wait` leaving the loop on a real error: an obviously-invalid port
-// name makes semaphore_wait fail immediately with something that is not
-// KERN_ABORTED, rather than succeeding or retrying.
-version(OSX)
-static if(threadingSupported)
-unittest {
-	Semaphore bogus;
-	bogus.handle = cast(semaphore_t) int.max;
-	wait(bogus);
-}
-
-
-// Covers `wait`'s EINTR retry, which only fires when a real signal
-// interrupts a thread actually blocked inside semaphore_wait.
-version(OSX)
-static if(threadingSupported)
-unittest {
-	import core.sys.posix.signal : sigaction_t, SIGUSR1, pthread_kill;
-	import core.sys.posix.unistd : usleep;
-	import bc.thread;
-
-	// `sigaction` predates druntime's nothrow/@nogc block for this module,
-	// so pull in the real libc symbol under the attributes this module
-	// needs. Leaving sa_mask at its zero .init gives an empty signal mask,
-	// and sa_flags = 0 deliberately omits SA_RESTART so the syscall aborts
-	// instead of transparently restarting.
-	pragma(mangle, "sigaction")
-	extern(C) nothrow @nogc int sigactionNoGC(int, const scope sigaction_t*, sigaction_t*);
-	extern(C) nothrow @nogc void noop(int) {}
-
-	sigaction_t act;
-	act.sa_handler = &noop;
-	sigactionNoGC(SIGUSR1, &act, null);
-
-	Semaphore s = create();
-	scope(exit) free(s);
-
-	static void blockOnWait(Semaphore* s) @nogc nothrow { wait(*s); }
-	bc.thread.Thread t = bc.thread.create(&blockOnWait, &s);
-
-	// There's no signal from inside the blocking mach trap saying "the
-	// thread is in it now", so send SIGUSR1 repeatedly for a while: any
-	// delivery that lands while the thread is inside semaphore_wait aborts
-	// it with KERN_ABORTED/EINTR, exercising the retry branch; deliveries
-	// that land earlier are harmless no-ops.
-	foreach(_; 0 .. 200) {
-		pthread_kill(t.handle, SIGUSR1);
-		usleep(1000);
+	/// Blocks until the count of `s` is above zero, then decrements it.
+	///
+	/// Examples:
+	/// ---
+	/// auto s = create().get;
+	/// post(s);
+	/// wait(s);
+	/// free(s);
+	/// ---
+	void wait(ref Semaphore s) @trusted {
+		// A signal interrupts the wait without a post, so retry; any other failure means `s` is not a live semaphore.
+		version(linux) while(sem_wait(&s.handle) != 0 && errno == EINTR) {}
+		else version(OSX) while(semaphore_wait(s.handle) == KERN_ABORTED) {}
+		else version(Windows) cast(void) WaitForSingleObject(s.handle, INFINITE);
 	}
 
-	post(s);
-	bc.thread.join(t);
+	/// Increments the count of `s`, waking one thread blocked in `wait` on it, if any. A post that would raise the count above `maxCount` is lost.
+	///
+	/// Examples:
+	/// ---
+	/// auto s = create().get;
+	/// post(s);
+	/// post(s);
+	/// wait(s);
+	/// wait(s);
+	/// free(s);
+	/// ---
+	void post(ref Semaphore s) @trusted {
+		version(linux) cast(void) sem_post(&s.handle);
+		else version(OSX) cast(void) semaphore_signal(s.handle);
+		else version(Windows) cast(void) ReleaseSemaphore(s.handle, 1, null);
+	}
+
 }

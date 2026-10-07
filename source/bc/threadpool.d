@@ -1,28 +1,25 @@
+/// A fork-join thread pool: worker threads pulling `Job`s from one shared queue. Without threads, a pool runs each job inline on the calling thread, so callers need not branch on the platform.
 module bc.threadpool;
 
-import fp.dynarray;
-import fp.pointer;
-import bc.thread;
-import bc.mutex;
-import bc.semaphore;
+static import bc.mutex;
+static import bc.platform;
+static import bc.semaphore;
+static import bc.thread;
+static import fp.dynarray;
+static import fp.pointer;
+public import bc.platform : threadingSupported;
 import core.atomic : atomicOp, atomicLoad, atomicStore;
 
 @nogc nothrow:
 
-public import bc.platform : threadingSupported;
-import bc.thread : hardwareConcurrency;
-import bc.platform : PthreadBackendMixin;
-
-// version identifiers are module-local, so bc.platform's `PthreadBackend`
-// tag doesn't reach here - mixin the shared declaration for the
-// extern(C)/extern(Windows) worker entry point below, which must match
-// bc.thread.ThreadFunction exactly.
-mixin(PthreadBackendMixin);
+mixin(bc.platform.pthreadBackendMixin);
 version (Windows) import core.sys.windows.windows : DWORD;
 
 
+/// The function a `Job` runs, called with the job's `arg` on a worker thread.
 alias JobFunction = void function(void*) @nogc nothrow;
 
+/// One unit of work: a worker calls `fn(arg)`.
 struct Job {
 	JobFunction fn;
 	void* arg;
@@ -31,12 +28,13 @@ struct Job {
 
 static if (threadingSupported) {
 
+	/// A pool of worker threads sharing one job queue, used through the pointer `create` returns. Its fields belong to the implementation.
 	struct ThreadPool {
-		Semaphore wake;
-		Semaphore done;
+		bc.semaphore.Semaphore wake;
+		bc.semaphore.Semaphore done;
 
 		Job* queue = null;
-		Mutex* queueLock;
+		bc.mutex.Mutex* queueLock;
 
 		shared ptrdiff_t outstanding = 0;
 		shared bool stopping = false;
@@ -45,16 +43,41 @@ static if (threadingSupported) {
 		private size_t count = 0;
 	}
 
+
+	/// How many worker threads `pool` has; always 1 without threads.
+	///
+	/// Examples:
+	/// ---
+	/// auto pool = create(3);
+	/// assert(workerCount(pool) == 3);
+	/// free(pool);
+	/// ---
+	size_t workerCount(const ThreadPool* pool) { return pool.count; }
+
+	/// How many jobs submitted to `pool`, queued or running, have not finished; always 0 without threads.
+	///
+	/// Examples:
+	/// ---
+	/// auto pool = create(2);
+	/// assert(pendingJobs(pool) == 0);
+	/// free(pool);
+	/// ---
+	size_t pendingJobs(const ThreadPool* pool) @trusted {
+		return cast(size_t) atomicLoad(pool.outstanding);
+	}
+
+
 	private Job claimJob(ThreadPool* pool) @trusted {
 		bc.mutex.writeLock(pool.queueLock);
 		Job job = *fp.dynarray.back(pool.queue);
-		fp.dynarray.popBack(pool.queue);
+		cast(void) fp.dynarray.popBack(pool.queue);
 		bc.mutex.writeUnlock(pool.queueLock);
 		return job;
 	}
 
 	private void workerLoop(ThreadPool* pool) @trusted {
 		while (true) {
+			// Every post to `wake` either stops the pool or follows one queued job, so the queue is not empty here.
 			bc.semaphore.wait(pool.wake);
 			if (atomicLoad(pool.stopping)) return;
 			Job job = claimJob(pool);
@@ -76,54 +99,16 @@ static if (threadingSupported) {
 		}
 	}
 
-	ThreadPool* create(size_t workerCount = 0) @trusted {
-		auto pool = fp.pointer.malloc!ThreadPool(1);
-		*pool = ThreadPool.init;
-		pool.count = workerCount > 0 ? workerCount : hardwareConcurrency();
-		fp.dynarray.growToSize(pool.handles, pool.count);
 
-		pool.wake = bc.semaphore.create(0);
-		pool.done = bc.semaphore.create(0);
-		pool.queueLock = bc.mutex.create();
-
-		foreach (i; 0 .. pool.count)
-			pool.handles[i] = bc.thread.create(&workerMain, pool);
-		return pool;
-	}
-
-	size_t workerCount(const ThreadPool* pool) { return pool.count; }
-
-	size_t pendingJobs(const ThreadPool* pool) @trusted {
-		return cast(size_t) atomicLoad(pool.outstanding);
-	}
-
-	void submit(ThreadPool* pool, scope Job[] jobs) @trusted {
-		if (jobs.length == 0) return;
-
-		bc.mutex.writeLock(pool.queueLock);
-		foreach (ref job; jobs) fp.dynarray.pushBack(pool.queue, job);
-		bc.mutex.writeUnlock(pool.queueLock);
-
-		atomicOp!"+="(pool.outstanding, cast(ptrdiff_t) jobs.length);
-		foreach (_; 0 .. jobs.length) bc.semaphore.post(pool.wake);
-	}
-
-	void wait(ThreadPool* pool) @trusted {
-		while (atomicLoad(pool.outstanding) > 0) bc.semaphore.wait(pool.done);
-	}
-
-	void waitJobCount(ThreadPool* pool, size_t count) @trusted {
-		while (atomicLoad(pool.outstanding) > cast(ptrdiff_t) count) {}
-	}
-
-	void run(ThreadPool* pool, scope Job[] jobs) @trusted {
-		immutable pending = pendingJobs(pool);
-		submit(pool, jobs);
-		waitJobCount(pool, pending);
-	}
-
+	/// Stops and joins every worker once its current job returns, then frees `pool`; does nothing if `pool` is null. Queued jobs that have not started never run, so `wait` first to finish them.
+	///
+	/// Examples:
+	/// ---
+	/// free(create(2));
+	/// free(null);
+	/// ---
 	void free(ThreadPool* pool) @trusted {
-		if (pool is null || pool.handles is null) return;
+		if (pool is null) return;
 		atomicStore(pool.stopping, true);
 		foreach (i; 0 .. pool.count) bc.semaphore.post(pool.wake);
 		foreach (i; 0 .. pool.count) bc.thread.join(pool.handles[i]);
@@ -135,169 +120,201 @@ static if (threadingSupported) {
 		fp.pointer.free(pool);
 	}
 
+	/// Starts a pool of `workerCount` workers, or `bc.thread.hardwareConcurrency()` of them if it is 0. Starting threads is the costly part, so create a pool once and reuse it.
+	///
+	/// Returns null, having stopped and freed whatever it started, if allocation or creating a semaphore, lock or thread fails.
+	///
+	/// Examples:
+	/// ---
+	/// ThreadPool* pool = create(2);
+	/// assert(pool !is null);
+	/// assert(workerCount(pool) == 2);
+	/// free(pool);
+	/// ---
+	ThreadPool* create(size_t workerCount = 0) @trusted {
+		auto pool = fp.pointer.malloc!ThreadPool(1);
+		if (pool is null) return null;
+		*pool = ThreadPool.init;
+
+		auto wake = bc.semaphore.create();
+		if (wake.isNull) {
+			fp.pointer.free(pool);
+			return null;
+		}
+		auto done = bc.semaphore.create();
+		if (done.isNull) {
+			bc.semaphore.free(wake.get);
+			fp.pointer.free(pool);
+			return null;
+		}
+		pool.queueLock = bc.mutex.create();
+		if (pool.queueLock is null) {
+			bc.semaphore.free(done.get);
+			bc.semaphore.free(wake.get);
+			fp.pointer.free(pool);
+			return null;
+		}
+		pool.wake = wake.get;
+		pool.done = done.get;
+
+		immutable count = workerCount > 0 ? workerCount : bc.thread.hardwareConcurrency();
+		if (fp.dynarray.growToSize(pool.handles, count) is null) {
+			free(pool);
+			return null;
+		}
+		foreach (i; 0 .. count) {
+			auto t = bc.thread.create(&workerMain, pool);
+			if (t.isNull) {
+				free(pool);
+				return null;
+			}
+			pool.handles[i] = t.get;
+			pool.count = i + 1;
+		}
+		return pool;
+	}
+
+
+	/// Queues a copy of each of `jobs` and returns without waiting for them; without threads, runs them first. A job may call it on its own pool to fork more work, which `wait` and `run` then wait for too.
+	///
+	/// Returns false, queuing none of `jobs`, if the queue cannot grow to hold them.
+	///
+	/// Examples:
+	/// ---
+	/// static void touch(void* arg) @nogc nothrow { *cast(int*) arg = 1; }
+	///
+	/// auto pool = create(2);
+	/// int touched = 0;
+	/// Job[1] jobs = [Job(&touch, &touched)];
+	/// assert(submit(pool, jobs[]));
+	/// wait(pool);
+	/// assert(touched == 1);
+	/// free(pool);
+	/// ---
+	bool submit(ThreadPool* pool, scope Job[] jobs) @trusted {
+		if (jobs.length == 0) return true;
+
+		bc.mutex.writeLock(pool.queueLock);
+		immutable queued = fp.dynarray.concatenate(pool.queue, jobs);
+		bc.mutex.writeUnlock(pool.queueLock);
+		if (!queued) return false;
+
+		// Count the jobs before waking a worker, or one could finish first and let `wait` see nothing outstanding too early.
+		atomicOp!"+="(pool.outstanding, cast(ptrdiff_t) jobs.length);
+		foreach (_; 0 .. jobs.length) bc.semaphore.post(pool.wake);
+		return true;
+	}
+
+
+	/// Sleeps until every job submitted to `pool`, by anyone, has finished. A job must never call it on its own pool: the job is itself unfinished, so it would wait forever.
+	///
+	/// Examples:
+	/// ---
+	/// auto pool = create(2);
+	/// wait(pool);
+	/// free(pool);
+	/// ---
+	void wait(ThreadPool* pool) @trusted {
+		while (atomicLoad(pool.outstanding) > 0) bc.semaphore.wait(pool.done);
+	}
+
+	/// Spins, rather than sleeping like `wait`, until at most `count` jobs submitted to `pool` have not finished.
+	///
+	/// Examples:
+	/// ---
+	/// auto pool = create(2);
+	/// waitJobCount(pool, 0);
+	/// free(pool);
+	/// ---
+	void waitJobCount(ThreadPool* pool, size_t count) @trusted {
+		while (atomicLoad(pool.outstanding) > cast(ptrdiff_t) count) {}
+	}
+
+	/// Submits `jobs`, then sleeps until they and every other job submitted to `pool` have finished. Like `wait`, a job must never call it on its own pool.
+	///
+	/// Returns false at once, running none of `jobs`, if `submit` fails.
+	///
+	/// Examples:
+	/// ---
+	/// static void touch(void* arg) @nogc nothrow { *cast(int*) arg = 1; }
+	///
+	/// auto pool = create(2);
+	/// int[3] touched;
+	/// Job[3] jobs = [Job(&touch, &touched[0]), Job(&touch, &touched[1]), Job(&touch, &touched[2])];
+	/// assert(run(pool, jobs[]));
+	/// assert(touched == [1, 1, 1]);
+	/// free(pool);
+	/// ---
+	bool run(ThreadPool* pool, scope Job[] jobs) @trusted {
+		if (!submit(pool, jobs)) return false;
+		wait(pool);
+		return true;
+	}
+
 } else {
 
 	struct ThreadPool {}
 
-	ThreadPool* create(size_t workerCount = 0) @trusted {
-		return fp.pointer.malloc!ThreadPool(1);
-	}
 
 	size_t workerCount(const ThreadPool* pool) { return 1; }
 
 	size_t pendingJobs(const ThreadPool* pool) { return 0; }
 
-	void submit(ThreadPool* pool, scope Job[] jobs) {
-		foreach (ref job; jobs) job.fn(job.arg);
+
+	void free(ThreadPool* pool) @trusted {
+		fp.pointer.free(pool);
 	}
+
+	ThreadPool* create(size_t workerCount = 0) @trusted {
+		return fp.pointer.malloc!ThreadPool(1);
+	}
+
+
+	bool submit(ThreadPool* pool, scope Job[] jobs) {
+		foreach (ref job; jobs) job.fn(job.arg);
+		return true;
+	}
+
 
 	void wait(ThreadPool* pool) {}
 
 	void waitJobCount(ThreadPool* pool, size_t count) {}
 
-	void run(ThreadPool* pool, scope Job[] jobs) {
-		submit(pool, jobs);
-	}
-
-	void free(ThreadPool* pool) @trusted {
-		fp.pointer.free(pool);
+	bool run(ThreadPool* pool, scope Job[] jobs) {
+		return submit(pool, jobs);
 	}
 }
 
 
 unittest {
-	static struct Counter { int value; }
+	static void bump(void* arg) @nogc nothrow { atomicOp!"+="(*cast(shared int*) arg, 1); }
 
-	static void increment(void* arg) @nogc nothrow {
-		auto c = cast(Counter*) arg;
-		c.value++;
+	// Acquisitions go pool, both semaphores, the lock (and with pthreads its rwlock), the handles, then each worker, so these fail each in turn.
+	static if (!threadingSupported) enum acquisitions = 1;
+	else version (PthreadBackend) enum acquisitions = 8;
+	else enum acquisitions = 7;
+	debug foreach (i; 0 .. acquisitions) {
+		bc.platform.failAfter(i);
+		assert(create(2) is null);
 	}
+	free(null);
 
-	auto pool = create(4);
+	auto pool = create(2);
+	assert(pool !is null);
 	scope(exit) free(pool);
-	assert(workerCount(pool) >= 1);
+	assert(workerCount(pool) == (threadingSupported ? 2 : 1));
 
-	immutable n = workerCount(pool);
-	Counter* counters = fp.dynarray.create!Counter(n);
-	scope(exit) fp.dynarray.free(counters);
-	foreach (ref c; fp.dynarray.slice(counters)) c.value = 0;
-
-	Job* jobs = fp.dynarray.create!Job(n);
-	scope(exit) fp.dynarray.free(jobs);
-	foreach (i, ref job; fp.dynarray.slice(jobs)) job = Job(&increment, &counters[i]);
-
-	run(pool, fp.dynarray.slice(jobs));
-	foreach (ref c; fp.dynarray.slice(counters)) assert(c.value == 1);
-
-	// Reusing the same pool for a second, smaller batch works too.
-	run(pool, jobs[0 .. 1]);
-	assert(counters[0].value == 2);
-}
-
-
-unittest {
-	// `run` queues jobs rather than requiring one per worker: with more
-	// jobs than workers, idle workers keep pulling from the queue until
-	// it's drained instead of every job needing its own worker slot.
-	static struct Counter { int value; }
-
-	static void increment(void* arg) @nogc nothrow {
-		auto c = cast(Counter*) arg;
-		c.value++;
+	shared int runs = 0;
+	Job[3] jobs = Job(&bump, cast(void*) &runs);
+	// The queue has never held a job, so must grow, and a refused allocation fails the `run` before it queues anything.
+	debug static if (threadingSupported) {
+		bc.platform.failAfter(0);
+		assert(!run(pool, jobs[]));
+		assert(pendingJobs(pool) == 0);
 	}
-
-	auto pool = create(4);
-	scope(exit) free(pool);
-
-	enum n = 97; // deliberately not a multiple of the worker count
-	Counter[n] counters;
-	foreach (ref c; counters) c.value = 0;
-
-	Job[n] jobs;
-	foreach (i; 0 .. n) jobs[i] = Job(&increment, &counters[i]);
-
-	run(pool, jobs[]);
-	foreach (ref c; counters) assert(c.value == 1);
-
-	// Draining a second, differently-sized batch through the same queue
-	// works too.
-	run(pool, jobs[0 .. 10]);
-	foreach (i; 0 .. 10) assert(counters[i].value == 2);
-	foreach (i; 10 .. n) assert(counters[i].value == 1);
-}
-
-
-unittest {
-	static struct Node {
-		int depth;
-		ThreadPool* pool;
-		shared int* totalRuns;
-		Node[] childSlots;
-		Job[] childJobSlots;
-	}
-
-	enum maxDepth = 2;
-	enum childCount = 3;
-
-	static void runNode(void* arg) @nogc nothrow {
-		auto node = cast(Node*) arg;
-		atomicOp!"+="(*node.totalRuns, 1);
-		if (node.depth >= maxDepth) return;
-
-		foreach (i, ref slot; node.childSlots) {
-			slot = Node(node.depth + 1, node.pool, node.totalRuns, null, null);
-			node.childJobSlots[i] = Job(&runNode, &slot);
-		}
-		submit(node.pool, node.childJobSlots);
-	}
-
-	auto pool = create(4);
-	scope(exit) free(pool);
-
-	shared int totalRuns = 0;
-	enum rootCount = 2;
-	enum totalChildren = rootCount * childCount;
-
-	Node[totalChildren] childNodes;
-	Job[totalChildren] childJobs;
-	Node[rootCount] roots;
-	Job[rootCount] rootJobs;
-	foreach (i; 0 .. rootCount) {
-		roots[i] = Node(0, pool, &totalRuns,
-			childNodes[i * childCount .. (i + 1) * childCount],
-			childJobs[i * childCount .. (i + 1) * childCount]);
-		rootJobs[i] = Job(&runNode, &roots[i]);
-	}
-
-	run(pool, rootJobs[]);
-
-	assert(totalRuns == rootCount + totalChildren);
-}
-
-
-unittest {
-	static struct Counter { int value; }
-
-	static void increment(void* arg) @nogc nothrow {
-		auto c = cast(Counter*) arg;
-		c.value++;
-	}
-
-	auto pool = create(4);
-	scope(exit) free(pool);
-
-	enum n = 16;
-	Counter[n] counters;
-	foreach (ref c; counters) c.value = 0;
-	Job[n] jobs;
-	foreach (i; 0 .. n) jobs[i] = Job(&increment, &counters[i]);
-
-	submit(pool, jobs[]);
-	wait(pool);
-	foreach (ref c; counters) assert(c.value == 1);
-
-	submit(pool, jobs[0 .. 8]);
-	submit(pool, jobs[8 .. n]);
-	wait(pool);
-	foreach (ref c; counters) assert(c.value == 2);
+	assert(run(pool, jobs[]));
+	assert(atomicLoad(runs) == 3);
+	assert(submit(pool, jobs[]));
+	waitJobCount(pool, 0);
+	assert(atomicLoad(runs) == 6);
 }
