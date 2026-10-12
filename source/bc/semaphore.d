@@ -2,7 +2,7 @@
 module bc.semaphore;
 
 static import bc.platform;
-import std.typecons : Nullable, nullable;
+static import fp.pointer;
 
 @nogc nothrow:
 
@@ -23,49 +23,58 @@ static if(bc.platform.threadingSupported) {
 	/// The largest count a semaphore can hold on every platform.
 	enum uint maxCount = int.max;
 
-	/// A counting semaphore made by `create`. Copy one only before threads share it: POSIX forbids waiting or posting through a copy of one in use.
+	/// A counting semaphore, used only through the pointer `create` returns: POSIX forbids waiting or posting through a copy of one.
 	version(linux) struct Semaphore { sem_t handle; }
 	else version(OSX) struct Semaphore { semaphore_t handle; }
 	else version(Windows) struct Semaphore { HANDLE handle; }
 
 
-	/// Creates a semaphore whose count starts at `initial`, which must not exceed `maxCount`.
+	/// Allocates a semaphore whose count starts at `initial`, which must not exceed `maxCount`. Several `bc` modules define `create`, so call it fully qualified, as `bc.semaphore.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
 	///
-	/// Returns an empty `Nullable` if the OS cannot create one.
-	///
-	/// Examples:
-	/// ---
-	/// auto s = create(1);
-	/// assert(!s.isNull);
-	/// wait(s.get);
-	/// free(s.get);
-	/// ---
-	Nullable!Semaphore create(uint initial = 0) @trusted {
-		assert(initial <= maxCount, "bc.semaphore: initial count above maxCount");
-		debug if(bc.platform.simulatedFailure()) return Nullable!Semaphore.init;
-		Semaphore s;
-		version(linux) {
-			if(sem_init(&s.handle, 0, initial) != 0) return Nullable!Semaphore.init;
-		} else version(OSX) {
-			if(semaphore_create(mach_task_self(), &s.handle, SYNC_POLICY_FIFO, cast(int) initial) != KERN_SUCCESS) return Nullable!Semaphore.init;
-		} else version(Windows) {
-			s.handle = CreateSemaphoreA(null, cast(int) initial, maxCount, null);
-			if(s.handle is null) return Nullable!Semaphore.init;
-		}
-		return nullable(s);
-	}
-
-	/// Destroys `s`, which no thread may still be waiting on.
+	/// Returns null, having freed what it allocated, if allocation fails or the OS cannot create one.
 	///
 	/// Examples:
 	/// ---
-	/// auto s = create().get;
+	/// Semaphore* s = bc.semaphore.create(1);
+	/// assert(s !is null);
+	/// wait(s);
 	/// free(s);
 	/// ---
-	void free(ref Semaphore s) @trusted {
+	Semaphore* create(uint initial = 0) @trusted {
+		assert(initial <= maxCount, "bc.semaphore: initial count above maxCount");
+		auto s = fp.pointer.malloc!Semaphore(1);
+		if(s is null) return null;
+		*s = Semaphore.init;
+		bool failed = false;
+		debug failed = bc.platform.simulatedFailure();
+		if(!failed) {
+			version(linux) failed = sem_init(&s.handle, 0, initial) != 0;
+			else version(OSX) failed = semaphore_create(mach_task_self(), &s.handle, SYNC_POLICY_FIFO, cast(int) initial) != KERN_SUCCESS;
+			else version(Windows) {
+				s.handle = CreateSemaphoreA(null, cast(int) initial, maxCount, null);
+				failed = s.handle is null;
+			}
+		}
+		if(failed) {
+			fp.pointer.free(s);
+			return null;
+		}
+		return s;
+	}
+
+	/// Destroys and frees `s`, which no thread may still be waiting on; does nothing if `s` is null. Freeing `s` twice is undefined.
+	///
+	/// Examples:
+	/// ---
+	/// free(bc.semaphore.create());
+	/// free(null);
+	/// ---
+	void free(Semaphore* s) @trusted {
+		if(s is null) return;
 		version(linux) cast(void) sem_destroy(&s.handle);
 		else version(OSX) cast(void) semaphore_destroy(mach_task_self(), s.handle);
 		else version(Windows) cast(void) CloseHandle(s.handle);
+		fp.pointer.free(s);
 	}
 
 
@@ -73,12 +82,12 @@ static if(bc.platform.threadingSupported) {
 	///
 	/// Examples:
 	/// ---
-	/// auto s = create().get;
+	/// Semaphore* s = bc.semaphore.create();
 	/// post(s);
 	/// wait(s);
 	/// free(s);
 	/// ---
-	void wait(ref Semaphore s) @trusted {
+	void wait(Semaphore* s) @trusted {
 		// A signal interrupts the wait without a post, so retry; any other failure means `s` is not a live semaphore.
 		version(linux) while(sem_wait(&s.handle) != 0 && errno == EINTR) {}
 		else version(OSX) while(semaphore_wait(s.handle) == KERN_ABORTED) {}
@@ -89,17 +98,86 @@ static if(bc.platform.threadingSupported) {
 	///
 	/// Examples:
 	/// ---
-	/// auto s = create().get;
+	/// Semaphore* s = bc.semaphore.create();
 	/// post(s);
 	/// post(s);
 	/// wait(s);
 	/// wait(s);
 	/// free(s);
 	/// ---
-	void post(ref Semaphore s) @trusted {
+	void post(Semaphore* s) @trusted {
 		version(linux) cast(void) sem_post(&s.handle);
 		else version(OSX) cast(void) semaphore_signal(s.handle);
 		else version(Windows) cast(void) ReleaseSemaphore(s.handle, 1, null);
+	}
+
+	version(unittest) version(linux) {
+		import core.sys.posix.semaphore : sem_getvalue;
+
+		/// The count of `s`, for tests to check that no post is left over; only Linux can report it.
+		///
+		/// Examples:
+		/// ---
+		/// version(linux) {
+		/// 	Semaphore* s = bc.semaphore.create(2);
+		/// 	assert(value(s) == 2);
+		/// 	free(s);
+		/// }
+		/// ---
+		package int value(Semaphore* s) @trusted {
+			int n;
+			immutable failed = sem_getvalue(&s.handle, &n) != 0;
+			assert(!failed);
+			return n;
+		}
+	}
+
+
+	unittest {
+		free(null);
+		debug {
+			bc.platform.failAfter(0);
+			assert(create() is null);
+			// The allocation succeeds, then creating the OS semaphore fails.
+			bc.platform.failAfter(1);
+			assert(create() is null);
+		}
+
+		auto s = create(2);
+		assert(s !is null);
+		scope(exit) free(s);
+		wait(s);
+		wait(s);
+		post(s);
+		post(s);
+		version(linux) assert(value(s) == 2);
+		wait(s);
+		wait(s);
+		version(linux) assert(value(s) == 0);
+
+		static import bc.thread;
+		static void waitThenMark(Semaphore* s, shared bool* passed) @nogc nothrow {
+			import core.atomic : atomicStore;
+			wait(s);
+			atomicStore(*passed, true);
+		}
+
+		// The count is zero, so the thread cannot pass its `wait` until this one posts, however long it is given.
+		import core.atomic : atomicLoad;
+		shared bool passed = false;
+		auto t = bc.thread.create(&waitThenMark, s, &passed);
+		assert(!t.isNull);
+		version(Windows) {
+			import core.sys.windows.winbase : Sleep;
+			Sleep(10);
+		} else {
+			import core.sys.posix.unistd : usleep;
+			cast(void) usleep(10_000);
+		}
+		assert(!atomicLoad(passed));
+		post(s);
+		bc.thread.join(t.get);
+		assert(atomicLoad(passed));
 	}
 
 }

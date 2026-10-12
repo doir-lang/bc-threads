@@ -1,4 +1,4 @@
-/// Imports every `bc` module.
+/// Imports every `bc` module. Several modules define the same names, such as `create`, so call them fully qualified (`bc.threadpool.create`), the preferred style throughout these libraries.
 module bc;
 
 public import bc.channel;

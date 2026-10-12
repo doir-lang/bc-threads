@@ -20,7 +20,11 @@ def describe(*args):
 # -cov names each listing after the path it compiled, so relative paths give the same names on every platform.
 def relative_to_root(path):
 	path = os.path.normpath(path)
-	inside = os.path.commonpath([root, os.path.abspath(path)]) == root
+	try:
+		inside = os.path.commonpath([root, os.path.abspath(path)]) == root
+	except ValueError:
+		# Windows raises this for paths on different drives, which cannot share a root.
+		inside = False
 	return os.path.relpath(path, root) if inside else path
 
 

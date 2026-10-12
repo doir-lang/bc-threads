@@ -65,8 +65,8 @@ bool isReadLocked(ref SpinLock self) @trusted {
 bool tryReadLock(ref SpinLock self) @trusted {
 	int cur = atomicLoad!(MemoryOrder.raw)(self.state);
 	// A failed `cas` stores the value it found in `cur`, so the loop retries against that.
-	while (cur >= 0)
-		if (cas(&self.state, &cur, cur + 1)) return true;
+	while(cur >= 0)
+		if(cas(&self.state, &cur, cur + 1)) return true;
 	return false;
 }
 
@@ -81,8 +81,8 @@ bool tryReadLock(ref SpinLock self) @trusted {
 /// ---
 void readLock(ref SpinLock self) @trusted {
 	// Spin on plain loads so waiters share the cache line, rather than each `cas` stealing it from the holder.
-	while (!tryReadLock(self))
-		while (atomicLoad!(MemoryOrder.raw)(self.state) < 0) pause();
+	while(!tryReadLock(self))
+		while(atomicLoad!(MemoryOrder.raw)(self.state) < 0) pause();
 }
 
 /// Releases a shared hold on `self`, which must be read-held.
@@ -123,8 +123,8 @@ bool tryWriteLock(ref SpinLock self) @trusted {
 /// writeUnlock(l);
 /// ---
 void writeLock(ref SpinLock self) @trusted {
-	while (!tryWriteLock(self))
-		while (atomicLoad!(MemoryOrder.raw)(self.state) != 0) pause();
+	while(!tryWriteLock(self))
+		while(atomicLoad!(MemoryOrder.raw)(self.state) != 0) pause();
 }
 
 /// Releases the exclusive hold on `self`, which must be write-held.
@@ -157,28 +157,29 @@ unittest {
 	assert(!tryReadLock(l) && !tryWriteLock(l));
 	writeUnlock(l);
 
-	static import bc.thread;
-	static if (bc.thread.threadingSupported) {
+	static import bc.platform;
+	static if(bc.platform.threadingSupported) {
+		static import bc.thread;
 		static void takeAndRelease(SpinLock* l, bool write) @nogc nothrow {
-			if (write) { writeLock(*l); writeUnlock(*l); }
+			if(write) { writeLock(*l); writeUnlock(*l); }
 			else { readLock(*l); readUnlock(*l); }
 		}
 
 		// Another thread takes `l` the other way while this one holds it, so must spin until the release.
-		foreach (i; 0 .. 2) {
+		foreach(i; 0 .. 2) {
 			immutable write = i == 1;
-			if (write) readLock(l); else writeLock(l);
+			if(write) readLock(l); else writeLock(l);
 			auto t = bc.thread.create(&takeAndRelease, &l, write);
 			assert(!t.isNull);
 			// Nothing shows when the thread starts spinning; one that starts late still passes.
-			version (Windows) {
+			version(Windows) {
 				import core.sys.windows.winbase : Sleep;
 				Sleep(10);
 			} else {
 				import core.sys.posix.unistd : usleep;
 				cast(void) usleep(10_000);
 			}
-			if (write) readUnlock(l); else writeUnlock(l);
+			if(write) readUnlock(l); else writeUnlock(l);
 			bc.thread.join(t.get);
 		}
 	}

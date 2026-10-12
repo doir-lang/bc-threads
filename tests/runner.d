@@ -9,16 +9,17 @@ private enum modules = [
 	"bc.semaphore",
 	"bc.mutex",
 	"bc.spinlock",
+	"bc.platform",
 ];
 
 private int runEveryTest() {
 	size_t total = 0;
 
-	static foreach (name; modules) {{
+	static foreach(name; modules) {{
 		alias mod = mixin("imported!\"" ~ name ~ "\"");
 		alias tests = __traits(getUnitTests, mod);
 		cast(void) fprintf(stderr, "%s (%d tests)\n", name.ptr, cast(int) tests.length);
-		static foreach (i, test; tests) {
+		static foreach(i, test; tests) {
 			cast(void) fprintf(stderr, "  [%d] ", cast(int) i);
 			test();
 			cast(void) fprintf(stderr, "ok\n");

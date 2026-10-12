@@ -37,13 +37,13 @@ static if(bc.platform.threadingSupported) {
 	else version(Windows) struct Mutex { SRWLOCK handle; }
 
 
-	/// Allocates an unlocked mutex.
+	/// Allocates an unlocked mutex. Several `bc` modules define `create`, so call it fully qualified, as `bc.mutex.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
 	///
 	/// Returns null, having freed what it allocated, if allocation or initialization fails.
 	///
 	/// Examples:
 	/// ---
-	/// Mutex* m = create();
+	/// Mutex* m = bc.mutex.create();
 	/// assert(m !is null);
 	/// free(m);
 	/// ---
@@ -62,11 +62,11 @@ static if(bc.platform.threadingSupported) {
 		return m;
 	}
 
-	/// Destroys and frees `m`, which no thread may hold; does nothing if `m` is null.
+	/// Destroys and frees `m`, which no thread may hold; does nothing if `m` is null. Freeing `m` twice is undefined.
 	///
 	/// Examples:
 	/// ---
-	/// free(create());
+	/// free(bc.mutex.create());
 	/// free(null);
 	/// ---
 	void free(Mutex* m) @trusted {
@@ -80,7 +80,7 @@ static if(bc.platform.threadingSupported) {
 	///
 	/// Examples:
 	/// ---
-	/// Mutex* m = create();
+	/// Mutex* m = bc.mutex.create();
 	/// assert(tryReadLock(m));
 	/// readUnlock(m);
 	/// free(m);
@@ -90,11 +90,11 @@ static if(bc.platform.threadingSupported) {
 		else version(Windows) return TryAcquireSRWLockShared(&m.handle) != 0;
 	}
 
-	/// Waits until no writer holds `m`, then takes a shared hold on it. The calling thread must not hold `m` for writing.
+	/// Waits until no writer holds `m`, then takes a shared hold on it. The calling thread must not already hold `m`: Windows forbids a second shared hold, and a writer-preferring rwlock deadlocks on one.
 	///
 	/// Examples:
 	/// ---
-	/// Mutex* m = create();
+	/// Mutex* m = bc.mutex.create();
 	/// readLock(m);
 	/// readUnlock(m);
 	/// free(m);
@@ -108,7 +108,7 @@ static if(bc.platform.threadingSupported) {
 	///
 	/// Examples:
 	/// ---
-	/// Mutex* m = create();
+	/// Mutex* m = bc.mutex.create();
 	/// readLock(m);
 	/// readUnlock(m);
 	/// assert(tryWriteLock(m));
@@ -125,7 +125,7 @@ static if(bc.platform.threadingSupported) {
 	///
 	/// Examples:
 	/// ---
-	/// Mutex* m = create();
+	/// Mutex* m = bc.mutex.create();
 	/// assert(tryWriteLock(m));
 	/// assert(!tryReadLock(m));
 	/// writeUnlock(m);
@@ -140,7 +140,7 @@ static if(bc.platform.threadingSupported) {
 	///
 	/// Examples:
 	/// ---
-	/// Mutex* m = create();
+	/// Mutex* m = bc.mutex.create();
 	/// writeLock(m);
 	/// writeUnlock(m);
 	/// free(m);
@@ -154,7 +154,7 @@ static if(bc.platform.threadingSupported) {
 	///
 	/// Examples:
 	/// ---
-	/// Mutex* m = create();
+	/// Mutex* m = bc.mutex.create();
 	/// writeLock(m);
 	/// writeUnlock(m);
 	/// assert(tryReadLock(m));
@@ -201,9 +201,23 @@ unittest {
 	scope(exit) free(m);
 
 	readLock(m);
-	assert(tryReadLock(m));
+	static if(bc.platform.threadingSupported) {
+		// Windows forbids taking a shared SRW lock twice on one thread, so a second thread takes the other hold.
+		static import bc.thread;
+		static void tryRead(Mutex* m, bool* ok) @nogc nothrow {
+			*ok = tryReadLock(m);
+			if(*ok) readUnlock(m);
+		}
+		bool ok = false;
+		auto t = bc.thread.create(&tryRead, m, &ok);
+		assert(!t.isNull);
+		bc.thread.join(t.get);
+		assert(ok);
+	} else {
+		assert(tryReadLock(m));
+		readUnlock(m);
+	}
 	assert(!tryWriteLock(m));
-	readUnlock(m);
 	readUnlock(m);
 
 	writeLock(m);
@@ -217,7 +231,7 @@ unittest {
 		bc.platform.failAfter(0);
 		assert(create() is null);
 		// The allocation succeeds, then initializing the rwlock fails.
-		version(PthreadBackend) {
+		static if(bc.platform.threadingSupported) version(PthreadBackend) {
 			bc.platform.failAfter(1);
 			assert(create() is null);
 		}

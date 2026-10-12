@@ -19,9 +19,10 @@ enum string pthreadBackendMixin = q{
 debug {
 	static import fp.pointer;
 
-	private __gshared bool failureArmed;
-	private __gshared size_t acquisitionsLeft;
-	private __gshared fp.pointer.AllocFunction realAllocFunction;
+	// Thread-local, like `fp.pointer.allocFunction`, so a failure armed on one thread is never consumed by another.
+	private bool failureArmed;
+	private size_t acquisitionsLeft;
+	private fp.pointer.AllocFunction realAllocFunction;
 
 	/// Whether the acquisition the caller is about to make, an allocation or an OS object, should fail as `failAfter` arranged. It exists only in debug builds, so callers check it under `debug`.
 	///
@@ -45,7 +46,7 @@ debug version(unittest) {
 		return realAllocFunction(p, size);
 	}
 
-	/// Lets the next `n` acquisitions on this thread succeed and makes the one after fail, then lets later ones succeed. Acquisitions are allocations through `fp.pointer` and OS objects whose creation checks `simulatedFailure`. It exists only in debug unittest builds.
+	/// Lets the next `n` acquisitions on this thread succeed and makes the one after fail, then lets later ones succeed. Acquisitions are allocations through `fp.pointer` and anything else, such as creating an OS object, that checks `simulatedFailure`. Calling it again before the failure happens replaces the earlier arrangement. It exists only in debug unittest builds.
 	///
 	/// Examples:
 	/// ---
@@ -59,9 +60,38 @@ debug version(unittest) {
 	/// }
 	/// ---
 	package void failAfter(size_t n) {
-		realAllocFunction = fp.pointer.allocFunction;
+		// Re-arming must not save the failing allocator as the real one, or every allocation would recurse forever.
+		if(!failureArmed) realAllocFunction = fp.pointer.allocFunction;
 		acquisitionsLeft = n;
 		failureArmed = true;
 		fp.pointer.allocFunction = &failingAllocFunction;
+	}
+}
+
+debug unittest {
+	failAfter(3);
+	failAfter(0);
+	assert(fp.pointer.malloc!int(1) is null);
+	int* p = fp.pointer.malloc!int(1);
+	assert(p !is null);
+	fp.pointer.free(p);
+
+	static if(threadingSupported) {
+		static import bc.semaphore;
+		static import bc.thread;
+		static void acquire(bool* ok) @nogc nothrow {
+			auto s = bc.semaphore.create();
+			*ok = s !is null;
+			bc.semaphore.free(s);
+		}
+
+		// Starting the thread takes two acquisitions here; the thread's own neither fail nor use up the failure armed.
+		bool ok = false;
+		failAfter(2);
+		auto t = bc.thread.create(&acquire, &ok);
+		assert(!t.isNull);
+		bc.thread.join(t.get);
+		assert(ok);
+		assert(simulatedFailure());
 	}
 }

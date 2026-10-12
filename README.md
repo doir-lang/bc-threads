@@ -7,6 +7,9 @@ See the DDoc on `submit`, `wait` and `run` in [source/bc/threadpool.d](source/bc
 Alongside the pool: `bc.mutex` (a reader-writer lock), `bc.semaphore`, `bc.channel`, `bc.thread`, and `bc.spinlock`, a reader-writer spinlock whose `.init` is unlocked, so a `__gshared` one needs no `create` or lazy initialization.
 On platforms without OS locks, `bc.mutex` falls back to it.
 
+Call these modules' functions fully qualified, as in `bc.threadpool.create(4)` or `bc.semaphore.post(s)`.
+Several modules define `create`, so after `import bc;` an unqualified `create` is ambiguous and does not compile.
+
 ## Building
 
 ```sh
@@ -14,7 +17,7 @@ dub build --config=library --compiler=ldc2   # static library
 dub test --compiler=ldc2                     # build and run the unittests
 ```
 
-LDC only: libfp, which this depends on, refuses DMD at compile time (see its README, including the analysis-only `FpAllowDMD` escape hatch).
+LDC only: libfp, which this depends on, refuses DMD at compile time (see its README, including the analysis-only `FpAllowDMD` escape hatch), so `dub.json` declares DMD unsupported and dub rejects it up front.
 
 ## Testing
 
