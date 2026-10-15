@@ -1,4 +1,4 @@
-/// Reader-writer locks that sleep while they wait: pthread rwlocks on Linux and macOS, slim reader/writer locks on Windows, and `bc.spinlock` where there are no OS locks.
+/// Reader-writer locks that sleep while they wait: pthread rwlocks on Linux, macOS and WASI, slim reader/writer locks on Windows, and `bc.spinlock` where there are no OS locks.
 module bc.mutex;
 
 static import bc.platform;

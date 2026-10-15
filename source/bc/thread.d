@@ -1,4 +1,4 @@
-/// OS threads: pthreads on Linux and macOS, Win32 threads on Windows.
+/// OS threads: pthreads on Linux, macOS and WASI, Win32 threads on Windows.
 module bc.thread;
 
 static import bc.platform;
