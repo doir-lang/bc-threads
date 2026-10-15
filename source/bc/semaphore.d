@@ -1,4 +1,4 @@
-/// Counting semaphores: POSIX semaphores on Linux, Mach semaphores on macOS, and semaphore objects on Windows.
+/// Counting semaphores: POSIX semaphores on Linux and WASI, Mach semaphores on macOS, and semaphore objects on Windows.
 module bc.semaphore;
 
 static import bc.platform;
@@ -6,9 +6,25 @@ static import fp.pointer;
 
 @nogc nothrow:
 
+version(linux) version = PosixSemaphore;
+else version(WASI) version = PosixSemaphore;
+
 version(linux) {
 	import core.stdc.errno : errno, EINTR;
 	import core.sys.posix.semaphore : sem_t, sem_init, sem_wait, sem_post, sem_destroy;
+} else version(WASI) {
+	import core.stdc.config : c_long;
+	import core.stdc.errno : errno, EINTR;
+
+	// druntime binds no semaphores for WASI, so declare wasi-libc's from its semaphore.h.
+	private struct sem_t { int[4 * c_long.sizeof / int.sizeof] val; }
+	static assert(sem_t.sizeof == 16);
+	extern(C) private {
+		int sem_init(sem_t*, int, uint);
+		int sem_destroy(sem_t*);
+		int sem_wait(sem_t*);
+		int sem_post(sem_t*);
+	}
 } else version(OSX) {
 	// macOS declares unnamed POSIX semaphores, but `sem_init` always fails with ENOSYS.
 	import core.sys.darwin.mach.kern_return : KERN_ABORTED, KERN_SUCCESS;
@@ -24,7 +40,7 @@ static if(bc.platform.threadingSupported) {
 	enum uint maxCount = int.max;
 
 	/// A counting semaphore, used only through the pointer `create` returns: POSIX forbids waiting or posting through a copy of one.
-	version(linux) struct Semaphore { sem_t handle; }
+	version(PosixSemaphore) struct Semaphore { sem_t handle; }
 	else version(OSX) struct Semaphore { semaphore_t handle; }
 	else version(Windows) struct Semaphore { HANDLE handle; }
 
@@ -48,7 +64,7 @@ static if(bc.platform.threadingSupported) {
 		bool failed = false;
 		debug failed = bc.platform.simulatedFailure();
 		if(!failed) {
-			version(linux) failed = sem_init(&s.handle, 0, initial) != 0;
+			version(PosixSemaphore) failed = sem_init(&s.handle, 0, initial) != 0;
 			else version(OSX) failed = semaphore_create(mach_task_self(), &s.handle, SYNC_POLICY_FIFO, cast(int) initial) != KERN_SUCCESS;
 			else version(Windows) {
 				s.handle = CreateSemaphoreA(null, cast(int) initial, maxCount, null);
@@ -71,7 +87,7 @@ static if(bc.platform.threadingSupported) {
 	/// ---
 	void free(Semaphore* s) @trusted {
 		if(s is null) return;
-		version(linux) cast(void) sem_destroy(&s.handle);
+		version(PosixSemaphore) cast(void) sem_destroy(&s.handle);
 		else version(OSX) cast(void) semaphore_destroy(mach_task_self(), s.handle);
 		else version(Windows) cast(void) CloseHandle(s.handle);
 		fp.pointer.free(s);
@@ -89,7 +105,7 @@ static if(bc.platform.threadingSupported) {
 	/// ---
 	void wait(Semaphore* s) @trusted {
 		// A signal interrupts the wait without a post, so retry; any other failure means `s` is not a live semaphore.
-		version(linux) while(sem_wait(&s.handle) != 0 && errno == EINTR) {}
+		version(PosixSemaphore) while(sem_wait(&s.handle) != 0 && errno == EINTR) {}
 		else version(OSX) while(semaphore_wait(s.handle) == KERN_ABORTED) {}
 		else version(Windows) cast(void) WaitForSingleObject(s.handle, INFINITE);
 	}
@@ -106,7 +122,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(s);
 	/// ---
 	void post(Semaphore* s) @trusted {
-		version(linux) cast(void) sem_post(&s.handle);
+		version(PosixSemaphore) cast(void) sem_post(&s.handle);
 		else version(OSX) cast(void) semaphore_signal(s.handle);
 		else version(Windows) cast(void) ReleaseSemaphore(s.handle, 1, null);
 	}
@@ -167,13 +183,7 @@ static if(bc.platform.threadingSupported) {
 		shared bool passed = false;
 		auto t = bc.thread.create(&waitThenMark, s, &passed);
 		assert(!t.isNull);
-		version(Windows) {
-			import core.sys.windows.winbase : Sleep;
-			Sleep(10);
-		} else {
-			import core.sys.posix.unistd : usleep;
-			cast(void) usleep(10_000);
-		}
+		bc.platform.nap(10);
 		assert(!atomicLoad(passed));
 		post(s);
 		bc.thread.join(t.get);

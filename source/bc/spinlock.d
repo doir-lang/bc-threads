@@ -172,13 +172,7 @@ unittest {
 			auto t = bc.thread.create(&takeAndRelease, &l, write);
 			assert(!t.isNull);
 			// Nothing shows when the thread starts spinning; one that starts late still passes.
-			version(Windows) {
-				import core.sys.windows.winbase : Sleep;
-				Sleep(10);
-			} else {
-				import core.sys.posix.unistd : usleep;
-				cast(void) usleep(10_000);
-			}
+			bc.platform.nap(10);
 			if(write) readUnlock(l); else writeUnlock(l);
 			bc.thread.join(t.get);
 		}

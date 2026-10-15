@@ -309,16 +309,6 @@ static if(threadingSupported) {
 
 unittest {
 	static void bump(void* arg) @nogc nothrow { atomicOp!"+="(*cast(shared int*) arg, 1); }
-	static void nap(size_t ms) @nogc nothrow {
-		version(Windows) {
-			import core.sys.windows.winbase : Sleep;
-			Sleep(cast(DWORD) ms);
-		} else {
-			import core.sys.posix.unistd : usleep;
-			cast(void) usleep(cast(uint) (ms * 1_000));
-		}
-	}
-
 	// Fails each acquisition in turn: pool, each semaphore and its OS object, the lock and any rwlock, the handles, then each worker.
 	static if(!threadingSupported) enum acquisitions = 1;
 	else version(PthreadBackend) enum acquisitions = 10;
@@ -372,7 +362,7 @@ unittest {
 		auto first = bc.thread.create(&waitOn, pool);
 		auto second = bc.thread.create(&waitOn, pool);
 		assert(!first.isNull && !second.isNull);
-		nap(10);
+		bc.platform.nap(10);
 		atomicStore(open, true);
 		bc.thread.join(first.get);
 		bc.thread.join(second.get);
@@ -380,7 +370,7 @@ unittest {
 		// `free` wakes a thread blocked in `wait` and waits for it to return before destroying the semaphore it was blocked on.
 		static shared bool returned;
 		static void waitAndMark(ThreadPool* p) @nogc nothrow { wait(p); atomicStore(returned, true); }
-		static void slow(void*) @nogc nothrow { nap(1); }
+		static void slow(void*) @nogc nothrow { bc.platform.nap(1); }
 		auto closing = create(1);
 		assert(closing !is null);
 		Job[100] queued;
@@ -388,7 +378,7 @@ unittest {
 		assert(submit(closing, queued[]));
 		auto blocked = bc.thread.create(&waitAndMark, closing);
 		assert(!blocked.isNull);
-		nap(10);
+		bc.platform.nap(10);
 		free(closing);
 		bc.thread.join(blocked.get);
 		assert(atomicLoad(returned));

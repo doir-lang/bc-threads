@@ -7,13 +7,34 @@ module bc.platform;
 version(linux) enum bool threadingSupported = true;
 else version(OSX) enum bool threadingSupported = true;
 else version(Windows) enum bool threadingSupported = true;
+// wasm has threads only when built with shared memory and atomics, as for `wasm32-wasip1-threads`.
+else version(WASI) enum bool threadingSupported = __traits(targetHasFeature, "atomics");
 else enum bool threadingSupported = false;
 
-/// Mixed in, declares `version(PthreadBackend)` on Linux and macOS. Version identifiers are module-local, so each module that branches on it mixes this in.
+/// Mixed in, declares `version(PthreadBackend)` on Linux, macOS and WASI. Version identifiers are module-local, so each module that branches on it mixes this in.
 enum string pthreadBackendMixin = q{
 	version(linux) version = PthreadBackend;
 	else version(OSX) version = PthreadBackend;
+	else version(WASI) version = PthreadBackend;
 };
+
+
+version(unittest) {
+	version(Windows) import core.sys.windows.winbase : Sleep;
+	else version(WASI) private extern(C) int usleep(uint);
+	else import core.sys.posix.unistd : usleep;
+
+	/// Sleeps the calling thread for about `ms` milliseconds, for tests that give another thread time to act. It exists only in unittest builds.
+	///
+	/// Examples:
+	/// ---
+	/// nap(1);
+	/// ---
+	package void nap(uint ms) {
+		version(Windows) Sleep(ms);
+		else cast(void) usleep(ms * 1_000);
+	}
+}
 
 
 debug {
