@@ -13,7 +13,7 @@ import std.typecons : Nullable;
 mixin(bc.platform.pthreadBackendMixin);
 
 // `Posix`, not `PthreadBackend`: imports resolve before the mixin above declares it.
-version(Posix) import core.sys.posix.pthread : pthread_t, pthread_create, pthread_join;
+version(Posix) import core.sys.posix.pthread : pthread_t, pthread_create, pthread_detach, pthread_join;
 
 version(linux) {
 	import core.sys.linux.sched : cpu_set_t, CPU_COUNT, sched_getaffinity;
@@ -160,6 +160,20 @@ static if(threadingSupported) {
 		}
 	}
 
+	/// Lets `t` run on unjoined, releasing it when it finishes, for a thread nothing will wait for. Call this or `join` on a thread, once, not both.
+	///
+	/// Examples:
+	/// ---
+	/// static void work() @nogc nothrow {}
+	/// auto t = bc.thread.create(&work);
+	/// assert(!t.isNull);
+	/// detach(t.get);
+	/// ---
+	void detach(ref Thread t) @trusted {
+		version(PthreadBackend) cast(void) pthread_detach(t.handle);
+		else version(Windows) cast(void) CloseHandle(t.handle);
+	}
+
 }
 
 
@@ -199,7 +213,7 @@ unittest {
 
 		// A thread that allocates through its own `fp.pointer.allocFunction` must find everything it allocated freed through it too, and the creator's must be untouched.
 		static import fp.pointer;
-		import core.atomic : atomicLoad, atomicOp;
+		import core.atomic : atomicLoad, atomicOp, atomicStore;
 		static __gshared fp.pointer.AllocFunction underlying;
 		static shared ptrdiff_t live = 0;
 		static shared ptrdiff_t calls = 0;
@@ -220,5 +234,13 @@ unittest {
 		join(t.get);
 		assert(calls == 2 && atomicLoad(live) == 0);
 		assert(fp.pointer.allocFunction is underlying);
+
+		// A detached thread runs to the end without anyone joining it.
+		static shared bool finished = false;
+		static void finish() @nogc nothrow { atomicStore(finished, true); }
+		t = create(&finish);
+		assert(!t.isNull);
+		detach(t.get);
+		while(!atomicLoad(finished)) bc.platform.nap(1);
 	}
 }
