@@ -10,6 +10,7 @@ private enum modules = [
 	"bc.mutex",
 	"bc.spinlock",
 	"bc.platform",
+	"bc.interner",
 ];
 
 private int runEveryTest() {

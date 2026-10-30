@@ -8,3 +8,4 @@ public import bc.semaphore;
 public import bc.mutex;
 public import bc.spinlock;
 public import bc.platform;
+public import bc.interner;
