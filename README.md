@@ -42,7 +42,7 @@ The script downloads wasi-sdk into `bin/wasi-sdk` on first use (or set `WASI_SYS
 Threads need an LDC newer than 1.43: until [ldc-developers/ldc#5268](https://github.com/ldc-developers/ldc/pull/5268), LDC compiled D's thread-locals on wasm as ordinary globals, which every thread would share.
 The script checks for this and refuses a threaded build with such a compiler; set `DC` to an LDC master build (CI uses `ldc-master`), or pass `--single-threaded`.
 
-The tests run through [@tybys/wasm-util](https://github.com/toyobayashi/wasm-util)'s WASI and [@emnapi/wasi-threads](https://github.com/toyobayashi/emnapi/tree/main/packages/wasi-threads), which starts each thread on a Web Worker (or a Node worker thread); the script installs both into `bin/wasi`, where the page and [tests/wasi/node.mjs](tests/wasi/node.mjs) import them alike.
+The tests run through [@bjorn3/browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim)'s WASI and [@emnapi/wasi-threads](https://github.com/toyobayashi/emnapi/tree/main/packages/wasi-threads), which starts each thread on a Web Worker (or a Node worker thread); the script installs both into `bin/wasi`, where the page and [tests/wasi/node.mjs](tests/wasi/node.mjs) import them alike.
 A page may block only off its main thread, so [tests/wasi/run.mjs](tests/wasi/run.mjs) runs the tests on a worker, and every thread reports its output and failures over a `BroadcastChannel`, since the thread that would otherwise hear of them may be blocked joining.
 Shared memory also needs a cross-origin isolated page, so `--serve` sends the `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` headers.
 Output arrives a line at a time, so a hung test shows the module it stopped in but not the test index.
