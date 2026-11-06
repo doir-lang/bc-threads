@@ -360,7 +360,7 @@ unittest {
 
 	static if(threadingSupported) {
 		static void gate(void* arg) @nogc nothrow { while(!atomicLoad(*cast(shared bool*) arg)) {} }
-		static void waitOn(ThreadPool* p) @nogc nothrow { wait(p); }
+		static void waitOn(ThreadPool* pool) @nogc nothrow { wait(pool); }
 
 		// Two threads wait on one job, so the one its `done` wakes must wake the other. One that starts late still passes.
 		shared bool open = false;

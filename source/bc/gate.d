@@ -46,10 +46,10 @@ struct Gate {
 /// leaveShared(gate);
 /// ---
 void enterShared(ref Gate gate) {
-	for (;;) {
-		while (core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) != 0) bc.thread.yield();
+	for(;;) {
+		while(core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) != 0) bc.thread.yield();
 		core.atomic.atomicOp!"+="(bc.platform.asShared(gate.sharers), 1);
-		if (core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) == 0) return;
+		if(core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) == 0) return;
 		core.atomic.atomicOp!"-="(bc.platform.asShared(gate.sharers), 1);
 	}
 }
@@ -77,7 +77,7 @@ void leaveShared(ref Gate gate) {
 /// leaveShared(gate);
 /// ---
 void yieldToExclusive(ref Gate gate) {
-	if (core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) == 0) return;
+	if(core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) == 0) return;
 	leaveShared(gate);
 	enterShared(gate);
 }
@@ -92,9 +92,9 @@ void yieldToExclusive(ref Gate gate) {
 /// ---
 void beginExclusive(ref Gate gate, bool sharing) {
 	core.atomic.atomicOp!"+="(bc.platform.asShared(gate.exclusiveWaiters), 1);
-	if (sharing) leaveShared(gate);
+	if(sharing) leaveShared(gate);
 	bc.spinlock.lockForWriting(gate.exclusive);
-	while (core.atomic.atomicLoad(bc.platform.asShared(gate.sharers)) != 0) bc.thread.yield();
+	while(core.atomic.atomicLoad(bc.platform.asShared(gate.sharers)) != 0) bc.thread.yield();
 }
 
 /// Releases the exclusive hold `beginExclusive` took; with `sharing`, as passed to it, the calling thread enters the gate to share it again.
@@ -110,7 +110,7 @@ void beginExclusive(ref Gate gate, bool sharing) {
 void endExclusive(ref Gate gate, bool sharing) {
 	bc.spinlock.unlockForWriting(gate.exclusive);
 	core.atomic.atomicOp!"-="(bc.platform.asShared(gate.exclusiveWaiters), 1);
-	if (sharing) enterShared(gate);
+	if(sharing) enterShared(gate);
 }
 
 
@@ -127,10 +127,10 @@ version(unittest) {
 	private void work(void* arg) @trusted {
 		auto s = cast(Shared*) arg;
 		enterShared(s.gate);
-		foreach (i; 0 .. 2000) {
-			if (core.atomic.atomicLoad(bc.platform.asShared(s.pair[0])) != core.atomic.atomicLoad(bc.platform.asShared(s.pair[1])))
+		foreach(i; 0 .. 2000) {
+			if(core.atomic.atomicLoad(bc.platform.asShared(s.pair[0])) != core.atomic.atomicLoad(bc.platform.asShared(s.pair[1])))
 				core.atomic.atomicOp!"+="(bc.platform.asShared(s.mismatches), 1);
-			if (i % 50 == 0) {
+			if(i % 50 == 0) {
 				beginExclusive(s.gate, true);
 				++s.pair[0];
 				bc.thread.yield(); // widen the window a sharer would see a half-changed pair in
@@ -144,13 +144,13 @@ version(unittest) {
 }
 
 unittest { // an exclusive holder's changes are never seen half-made by sharing threads
-	static if (bc.platform.threadingSupported) {
+	static if(bc.platform.threadingSupported) {
 		Shared s;
 		auto pool = bc.threadpool.create(4);
 		assert(pool !is null);
 		scope(exit) bc.threadpool.free(pool);
 		bc.threadpool.Job[4] jobs;
-		foreach (ref job; jobs) job = bc.threadpool.Job(&work, &s);
+		foreach(ref job; jobs) job = bc.threadpool.Job(&work, &s);
 		assert(bc.threadpool.run(pool, jobs[]));
 		assert(s.mismatches == 0 && s.pair[0] == 4 * 40 && s.pair[1] == s.pair[0] && s.gate.sharers == 0 && s.gate.exclusiveWaiters == 0);
 	}

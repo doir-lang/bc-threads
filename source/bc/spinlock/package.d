@@ -12,8 +12,6 @@ struct SpinLock {
 }
 
 
-
-
 /// Whether readers or a writer hold `self`.
 ///
 /// Examples:
@@ -65,10 +63,10 @@ bool isLockedForReading(ref SpinLock self) @trusted {
 /// unlockForReading(l);
 /// ---
 bool tryLockForReading(ref SpinLock self) @trusted {
-	int cur = atomicLoad!(MemoryOrder.raw)(self.state);
-	// A failed `cas` stores the value it found in `cur`, so the loop retries against that.
-	while(cur >= 0)
-		if(cas(&self.state, &cur, cur + 1)) return true;
+	int current = atomicLoad!(MemoryOrder.raw)(self.state);
+	// A failed `cas` stores the value it found in `current`, so the loop retries against that.
+	while(current >= 0)
+		if(cas(&self.state, &current, current + 1)) return true;
 	return false;
 }
 

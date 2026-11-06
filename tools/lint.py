@@ -33,6 +33,7 @@ CONFIG = {
 	'check_ecrs_writes': False,
 	'exempt': {
 		'hand-written-shared-cast': ['source/bc/platform.d'],
+		'millisecond-clock': ['source/bc/thread.d'],
 		'posix-yield': ['source/bc/thread.d'],
 		'raw-memcmp': [],
 		'raw-byte-hash': [],
@@ -54,7 +55,8 @@ CRYPTIC = {
 # (id, pattern, message, hint)
 PUSHED = [
 	('hand-written-shared-cast', r'\*\s*cast\s*\(\s*shared\s*\(', 'field viewed as shared through a hand-written cast', 'use bc.platform.asShared'),
-	('posix-yield', r'\bsched_yield\b|\bnanosleep\b|\bclock_gettime\b', 'direct scheduler or clock call', 'use bc.thread.yield, bc.thread.sleep or bc.thread.monotonicSeconds'),
+	('posix-yield', r'\bsched_yield\b|\bnanosleep\b|\bclock_gettime\b', 'direct scheduler or clock call', 'use bc.thread.yield, bc.thread.sleep or bc.thread.monotonicMicroseconds'),
+	('millisecond-clock', r'monotonicMicroseconds\s*\(\s*\)\s*/\s*1_?000', 'milliseconds derived from the microsecond clock', 'use bc.thread.monotonicMilliseconds'),
 	('raw-memcmp', r'\bmemcmp\s*\(\s*&', 'struct compared by its raw bytes, padding included', 'use fp.lifecycle.equal'),
 	('raw-byte-hash', r'\b(murmur|hashBytes)\s*\(\s*\(\s*cast\s*\(\s*const\s*\(\s*ubyte\s*\)\s*\*\s*\)\s*&', 'struct hashed by its raw bytes, padding included', 'use fp.lifecycle.contentHash'),
 	('make-dynamic', r'\bmakeDynamic\b', 'makeDynamic', 'use fp.string.clone'),

@@ -412,7 +412,7 @@ void free(T)(LocalChannel!T* channel) @trusted {
 static if(!bc.platform.threadingSupported) {
 	/// Without threads every channel is a `LocalChannel`, made by `create` as by `createLocal`.
 	alias Channel = LocalChannel;
-	/// Ditto
+	/// With no threads to share a channel between, `create` makes a `LocalChannel`, exactly as `createLocal` does.
 	alias create = createLocal;
 }
 

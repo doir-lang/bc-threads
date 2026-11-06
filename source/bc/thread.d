@@ -56,7 +56,6 @@ size_t processorCount() @trusted {
 }
 
 
-
 // --- scheduling and time -------------------------------------------------------
 
 // druntime binds neither `clock_gettime` nor `CLOCK_MONOTONIC` on macOS, though libSystem has had both since 10.12.
@@ -139,6 +138,17 @@ ulong monotonicMicroseconds() @trusted {
 	}
 }
 
+/// Whole milliseconds since the same origin as `monotonicMicroseconds`, for deadlines and timeouts counted in milliseconds.
+///
+/// Examples:
+/// ---
+/// immutable deadline = monotonicMilliseconds() + 50;
+/// assert(monotonicMilliseconds() <= deadline);
+/// ---
+ulong monotonicMilliseconds() {
+	return monotonicMicroseconds() / 1000;
+}
+
 static if(threadingSupported) {
 
 	/// The entry point `create` runs on a new thread: `extern(C)` returning `void*` with pthreads, `extern(Windows)` returning `DWORD` on Windows.
@@ -216,11 +226,11 @@ static if(threadingSupported) {
 	/// ---
 	Nullable!Thread create(F, Args...)(F entry, Args args) @trusted
 	if(is(typeof(entry(args))) && !is(F == ThreadFunction)) {
-		alias C = Closure!(F, Args);
+		alias closureType = Closure!(F, Args);
 		debug if(bc.platform.simulatedFailure()) return Nullable!Thread.init;
-		auto closure = cast(C*) core.stdc.stdlib.malloc(C.sizeof);
+		auto closure = cast(closureType*) core.stdc.stdlib.malloc(closureType.sizeof);
 		if(closure is null) return Nullable!Thread.init;
-		*closure = C(entry, args);
+		*closure = closureType(entry, args);
 		auto t = create(&closureTrampoline!(F, Args), closure);
 		if(t.isNull) core.stdc.stdlib.free(closure);
 		return t;
@@ -244,7 +254,7 @@ static if(threadingSupported) {
 		}
 	}
 
-	/// Lets `t` run on unjoined, releasing it when it finishes, for a thread nothing will wait for. Call this or `join` on a thread, once, not both.
+	/// Lets `t` run unjoined, releasing it when it finishes, for a thread nothing will wait for. Call this or `join` on a thread, once, not both.
 	///
 	/// Examples:
 	/// ---
@@ -278,6 +288,12 @@ unittest {
 		assert(pinnedCount == 1);
 	}
 
+	// The millisecond clock is the microsecond one truncated, and never runs backwards.
+	immutable microseconds = monotonicMicroseconds();
+	immutable milliseconds = monotonicMilliseconds();
+	assert(milliseconds == microseconds / 1000 || milliseconds == microseconds / 1000 + 1);
+	assert(monotonicMilliseconds() >= milliseconds);
+
 	static if(threadingSupported) {
 		static void add(int* sum, int a, int b) @nogc nothrow { *sum = a + b; }
 
@@ -295,7 +311,7 @@ unittest {
 		}
 		assert(sum == 7);
 
-		// A thread that allocates through its own `fp.pointer.allocator` must find everything it allocated freed through it too, and the creator's must be untouched.
+		// A thread's own `fp.pointer.allocator` must free everything it allocated; the creator's stays untouched.
 		static import fp.pointer;
 		import core.atomic : atomicLoad, atomicOp, atomicStore;
 		static __gshared fp.pointer.Allocator underlying;
