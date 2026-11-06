@@ -10,4 +10,7 @@ public import bc.monitor;
 public import bc.spinlock;
 public import bc.readerlock;
 public import bc.platform;
+public import bc.atomics;
+public import bc.striped;
+public import bc.gate;
 public import bc.interner;

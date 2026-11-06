@@ -6,7 +6,7 @@ static import fp.pointer;
 
 @nogc nothrow:
 
-mixin(bc.platform.pthreadBackendMixin);
+mixin(bc.platform.backendSelection);
 
 // `Posix`, not `PthreadBackend`: imports resolve before the mixin above declares it.
 version(Posix) {
@@ -48,7 +48,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	Mutex* create() @trusted {
-		auto m = fp.pointer.malloc!Mutex(1);
+		auto m = fp.pointer.allocate!Mutex(1);
 		if(m is null) return null;
 		*m = Mutex.init;
 		version(PthreadBackend) {
@@ -81,11 +81,11 @@ static if(bc.platform.threadingSupported) {
 	/// Examples:
 	/// ---
 	/// Mutex* m = bc.mutex.create();
-	/// assert(tryReadLock(m));
-	/// readUnlock(m);
+	/// assert(tryLockForReading(m));
+	/// unlockForReading(m);
 	/// free(m);
 	/// ---
-	bool tryReadLock(Mutex* m) @trusted {
+	bool tryLockForReading(Mutex* m) @trusted {
 		version(PthreadBackend) return pthread_rwlock_tryrdlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockShared(&m.handle) != 0;
 	}
@@ -95,11 +95,11 @@ static if(bc.platform.threadingSupported) {
 	/// Examples:
 	/// ---
 	/// Mutex* m = bc.mutex.create();
-	/// readLock(m);
-	/// readUnlock(m);
+	/// lockForReading(m);
+	/// unlockForReading(m);
 	/// free(m);
 	/// ---
-	void readLock(Mutex* m) @trusted {
+	void lockForReading(Mutex* m) @trusted {
 		version(PthreadBackend) cast(void) pthread_rwlock_rdlock(&m.handle);
 		else version(Windows) AcquireSRWLockShared(&m.handle);
 	}
@@ -109,13 +109,13 @@ static if(bc.platform.threadingSupported) {
 	/// Examples:
 	/// ---
 	/// Mutex* m = bc.mutex.create();
-	/// readLock(m);
-	/// readUnlock(m);
-	/// assert(tryWriteLock(m));
-	/// writeUnlock(m);
+	/// lockForReading(m);
+	/// unlockForReading(m);
+	/// assert(tryLockForWriting(m));
+	/// unlockForWriting(m);
 	/// free(m);
 	/// ---
-	void readUnlock(Mutex* m) @trusted {
+	void unlockForReading(Mutex* m) @trusted {
 		version(PthreadBackend) cast(void) pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockShared(&m.handle);
 	}
@@ -126,12 +126,12 @@ static if(bc.platform.threadingSupported) {
 	/// Examples:
 	/// ---
 	/// Mutex* m = bc.mutex.create();
-	/// assert(tryWriteLock(m));
-	/// assert(!tryReadLock(m));
-	/// writeUnlock(m);
+	/// assert(tryLockForWriting(m));
+	/// assert(!tryLockForReading(m));
+	/// unlockForWriting(m);
 	/// free(m);
 	/// ---
-	bool tryWriteLock(Mutex* m) @trusted {
+	bool tryLockForWriting(Mutex* m) @trusted {
 		version(PthreadBackend) return pthread_rwlock_trywrlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockExclusive(&m.handle) != 0;
 	}
@@ -141,11 +141,11 @@ static if(bc.platform.threadingSupported) {
 	/// Examples:
 	/// ---
 	/// Mutex* m = bc.mutex.create();
-	/// writeLock(m);
-	/// writeUnlock(m);
+	/// lockForWriting(m);
+	/// unlockForWriting(m);
 	/// free(m);
 	/// ---
-	void writeLock(Mutex* m) @trusted {
+	void lockForWriting(Mutex* m) @trusted {
 		version(PthreadBackend) cast(void) pthread_rwlock_wrlock(&m.handle);
 		else version(Windows) AcquireSRWLockExclusive(&m.handle);
 	}
@@ -155,13 +155,13 @@ static if(bc.platform.threadingSupported) {
 	/// Examples:
 	/// ---
 	/// Mutex* m = bc.mutex.create();
-	/// writeLock(m);
-	/// writeUnlock(m);
-	/// assert(tryReadLock(m));
-	/// readUnlock(m);
+	/// lockForWriting(m);
+	/// unlockForWriting(m);
+	/// assert(tryLockForReading(m));
+	/// unlockForReading(m);
 	/// free(m);
 	/// ---
-	void writeUnlock(Mutex* m) @trusted {
+	void unlockForWriting(Mutex* m) @trusted {
 		version(PthreadBackend) cast(void) pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockExclusive(&m.handle);
 	}
@@ -175,23 +175,30 @@ static if(bc.platform.threadingSupported) {
 
 
 	Mutex* create() @trusted {
-		auto m = fp.pointer.malloc!Mutex(1);
+		auto m = fp.pointer.allocate!Mutex(1);
 		if(m is null) return null;
 		*m = Mutex.init;
 		return m;
 	}
 
+	// wrapper: the threadless build keeps the threaded API
 	void free(Mutex* m) @trusted { fp.pointer.free(m); }
 
 
-	bool tryReadLock(Mutex* m) @trusted { return bc.spinlock.tryReadLock(m.lock); }
-	void readLock(Mutex* m) @trusted { bc.spinlock.readLock(m.lock); }
-	void readUnlock(Mutex* m) @trusted { bc.spinlock.readUnlock(m.lock); }
+	// wrapper: the threadless build keeps the threaded API
+	bool tryLockForReading(Mutex* m) @trusted { return bc.spinlock.tryLockForReading(m.lock); }
+	// wrapper: the threadless build keeps the threaded API
+	void lockForReading(Mutex* m) @trusted { bc.spinlock.lockForReading(m.lock); }
+	// wrapper: the threadless build keeps the threaded API
+	void unlockForReading(Mutex* m) @trusted { bc.spinlock.unlockForReading(m.lock); }
 
 
-	bool tryWriteLock(Mutex* m) @trusted { return bc.spinlock.tryWriteLock(m.lock); }
-	void writeLock(Mutex* m) @trusted { bc.spinlock.writeLock(m.lock); }
-	void writeUnlock(Mutex* m) @trusted { bc.spinlock.writeUnlock(m.lock); }
+	// wrapper: the threadless build keeps the threaded API
+	bool tryLockForWriting(Mutex* m) @trusted { return bc.spinlock.tryLockForWriting(m.lock); }
+	// wrapper: the threadless build keeps the threaded API
+	void lockForWriting(Mutex* m) @trusted { bc.spinlock.lockForWriting(m.lock); }
+	// wrapper: the threadless build keeps the threaded API
+	void unlockForWriting(Mutex* m) @trusted { bc.spinlock.unlockForWriting(m.lock); }
 
 }
 
@@ -201,13 +208,13 @@ unittest {
 	assert(m !is null);
 	scope(exit) free(m);
 
-	readLock(m);
+	lockForReading(m);
 	static if(bc.platform.threadingSupported) {
 		// Windows forbids taking a shared SRW lock twice on one thread, so a second thread takes the other hold.
 		static import bc.thread;
 		static void tryRead(Mutex* m, bool* ok) @nogc nothrow {
-			*ok = tryReadLock(m);
-			if(*ok) readUnlock(m);
+			*ok = tryLockForReading(m);
+			if(*ok) unlockForReading(m);
 		}
 		bool ok = false;
 		auto t = bc.thread.create(&tryRead, m, &ok);
@@ -215,17 +222,17 @@ unittest {
 		bc.thread.join(t.get);
 		assert(ok);
 	} else {
-		assert(tryReadLock(m));
-		readUnlock(m);
+		assert(tryLockForReading(m));
+		unlockForReading(m);
 	}
-	assert(!tryWriteLock(m));
-	readUnlock(m);
+	assert(!tryLockForWriting(m));
+	unlockForReading(m);
 
-	writeLock(m);
-	assert(!tryReadLock(m));
-	writeUnlock(m);
-	assert(tryWriteLock(m));
-	writeUnlock(m);
+	lockForWriting(m);
+	assert(!tryLockForReading(m));
+	unlockForWriting(m);
+	assert(tryLockForWriting(m));
+	unlockForWriting(m);
 
 	free(null);
 	debug {

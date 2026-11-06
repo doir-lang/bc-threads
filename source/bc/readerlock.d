@@ -14,6 +14,7 @@ module bc.readerlock;
 static import core.atomic;
 
 static import bc.monitor;
+static import bc.platform;
 static import bc.spinlock;
 
 @nogc nothrow:
@@ -27,67 +28,62 @@ enum size_t readerShards = 16;
 /// Examples:
 /// ---
 /// ReaderLock l;
-/// readLock(l);
-/// readUnlock(l);
+/// lockForReading(l);
+/// unlockForReading(l);
 /// ---
 struct ReaderLock {
 	private static struct Shard {
-		align(64) bc.spinlock.SpinLock lock;
+		align(bc.platform.cacheLineBytes) bc.spinlock.SpinLock lock;
 	}
 	private Shard[readerShards] shards;
 }
 
 private shared size_t shardsGiven; // threads given a shard, round-robin
-private size_t ownShard = size_t.max; // module scope, so one per thread; the shard this thread reads under
+private enum size_t noShard = size_t.max;
+private size_t ownShard = noShard; // module scope, so one per thread; the shard this thread reads under
 
 private ref bc.spinlock.SpinLock shardOf(return ref ReaderLock self) {
-	if(ownShard == size_t.max) ownShard = core.atomic.atomicOp!"+="(shardsGiven, 1) % readerShards;
+	if(ownShard == noShard) ownShard = core.atomic.atomicOp!"+="(shardsGiven, 1) % readerShards;
 	return self.shards[ownShard].lock;
 }
 
 
-/// An unlocked lock, the same as `ReaderLock.init`, which `bc.monitor` makes its locks with. Never fails.
-///
-/// Examples:
-/// ---
-/// ReaderLock l = bc.readerlock.create();
-/// writeLock(l);
-/// writeUnlock(l);
-/// ---
-ReaderLock create() { return ReaderLock.init; }
 
+// wrapper: takes the calling thread's shard
 /// Spins until no writer holds `self`, then takes a shared hold on the calling thread's shard.
 ///
 /// Examples:
 /// ---
 /// ReaderLock l;
-/// readLock(l);
-/// assert(!tryWriteLock(l));
-/// readUnlock(l);
+/// lockForReading(l);
+/// assert(!tryLockForWriting(l));
+/// unlockForReading(l);
 /// ---
-void readLock(ref ReaderLock self) { bc.spinlock.readLock(shardOf(self)); }
+void lockForReading(ref ReaderLock self) { bc.spinlock.lockForReading(shardOf(self)); }
 
+// wrapper: takes the calling thread's shard
 /// Releases the calling thread's shared hold on `self`.
 ///
 /// Examples:
 /// ---
 /// ReaderLock l;
-/// readLock(l);
-/// readUnlock(l);
-/// assert(tryWriteLock(l));
-/// writeUnlock(l);
+/// lockForReading(l);
+/// unlockForReading(l);
+/// assert(tryLockForWriting(l));
+/// unlockForWriting(l);
 /// ---
-void readUnlock(ref ReaderLock self) { bc.spinlock.readUnlock(shardOf(self)); }
+void unlockForReading(ref ReaderLock self) { bc.spinlock.unlockForReading(shardOf(self)); }
 
+// wrapper: takes the calling thread's shard
 /// Takes a shared hold on the calling thread's shard without waiting; returns false, taking nothing, if a writer holds `self`.
 ///
 /// Examples:
 /// ---
 /// ReaderLock l;
-/// assert(tryReadLock(l));
-/// readUnlock(l);
+/// assert(tryLockForReading(l));
+/// unlockForReading(l);
 /// ---
-bool tryReadLock(ref ReaderLock self) { return bc.spinlock.tryReadLock(shardOf(self)); }
+bool tryLockForReading(ref ReaderLock self) { return bc.spinlock.tryLockForReading(shardOf(self)); }
 
 
 /// Spins until nobody holds `self`, then takes every shard exclusively, in order, so two writers cannot each hold part of it.
@@ -95,12 +91,12 @@ bool tryReadLock(ref ReaderLock self) { return bc.spinlock.tryReadLock(shardOf(s
 /// Examples:
 /// ---
 /// ReaderLock l;
-/// writeLock(l);
-/// assert(!tryReadLock(l));
-/// writeUnlock(l);
+/// lockForWriting(l);
+/// assert(!tryLockForReading(l));
+/// unlockForWriting(l);
 /// ---
-void writeLock(ref ReaderLock self) {
-	foreach(ref shard; self.shards) bc.spinlock.writeLock(shard.lock);
+void lockForWriting(ref ReaderLock self) {
+	foreach(ref shard; self.shards) bc.spinlock.lockForWriting(shard.lock);
 }
 
 /// Releases the exclusive hold on `self`.
@@ -108,13 +104,13 @@ void writeLock(ref ReaderLock self) {
 /// Examples:
 /// ---
 /// ReaderLock l;
-/// writeLock(l);
-/// writeUnlock(l);
-/// assert(tryReadLock(l));
-/// readUnlock(l);
+/// lockForWriting(l);
+/// unlockForWriting(l);
+/// assert(tryLockForReading(l));
+/// unlockForReading(l);
 /// ---
-void writeUnlock(ref ReaderLock self) {
-	foreach(ref shard; self.shards) bc.spinlock.writeUnlock(shard.lock);
+void unlockForWriting(ref ReaderLock self) {
+	foreach(ref shard; self.shards) bc.spinlock.unlockForWriting(shard.lock);
 }
 
 /// Takes every shard exclusively without waiting; returns false, taking nothing, if anyone holds `self`.
@@ -122,14 +118,14 @@ void writeUnlock(ref ReaderLock self) {
 /// Examples:
 /// ---
 /// ReaderLock l;
-/// assert(tryWriteLock(l));
-/// assert(!tryWriteLock(l));
-/// writeUnlock(l);
+/// assert(tryLockForWriting(l));
+/// assert(!tryLockForWriting(l));
+/// unlockForWriting(l);
 /// ---
-bool tryWriteLock(ref ReaderLock self) {
+bool tryLockForWriting(ref ReaderLock self) {
 	foreach(i, ref shard; self.shards)
-		if(!bc.spinlock.tryWriteLock(shard.lock)) {
-			foreach(ref taken; self.shards[0 .. i]) bc.spinlock.writeUnlock(taken.lock);
+		if(!bc.spinlock.tryLockForWriting(shard.lock)) {
+			foreach(ref taken; self.shards[0 .. i]) bc.spinlock.unlockForWriting(taken.lock);
 			return false;
 		}
 	return true;
@@ -138,20 +134,20 @@ bool tryWriteLock(ref ReaderLock self) {
 
 unittest {
 	static assert(bc.monitor.isLock!ReaderLock);
-	ReaderLock l = create();
-	readLock(l);
-	assert(!tryWriteLock(l));
-	readUnlock(l);
+	ReaderLock l;
+	lockForReading(l);
+	assert(!tryLockForWriting(l));
+	unlockForReading(l);
 	// Held on the last shard, a write hold fails after taking every other, and gives them back.
-	bc.spinlock.readLock(l.shards[$ - 1].lock);
-	assert(!tryWriteLock(l));
-	foreach(ref shard; l.shards) assert(!bc.spinlock.isWriteLocked(shard.lock));
-	bc.spinlock.readUnlock(l.shards[$ - 1].lock);
-	assert(tryWriteLock(l));
-	assert(!tryReadLock(l) && !tryWriteLock(l));
-	writeUnlock(l);
-	writeLock(l);
-	writeUnlock(l);
+	bc.spinlock.lockForReading(l.shards[$ - 1].lock);
+	assert(!tryLockForWriting(l));
+	foreach(ref shard; l.shards) assert(!bc.spinlock.isLockedForWriting(shard.lock));
+	bc.spinlock.unlockForReading(l.shards[$ - 1].lock);
+	assert(tryLockForWriting(l));
+	assert(!tryLockForReading(l) && !tryLockForWriting(l));
+	unlockForWriting(l);
+	lockForWriting(l);
+	unlockForWriting(l);
 	foreach(ref shard; l.shards) assert(!bc.spinlock.isLocked(shard.lock));
 
 	static import bc.platform;

@@ -29,9 +29,9 @@ private template lockScope(L) {
 	else alias lockScope = __traits(parent, L);
 }
 
-/// Whether `L` can lock a `Monitor`: the module (or other scope) declaring `L`, or its pointee when `L` is a pointer, has free functions `L create()`, `readLock`, `readUnlock`, `writeLock` and `writeUnlock`, each `@nogc nothrow` and taking an `L` by value or `ref`.
+/// Whether `L` can lock a `Monitor`: the module (or other scope) declaring `L`, or its pointee when `L` is a pointer, has free functions `lockForReading`, `unlockForReading`, `lockForWriting` and `unlockForWriting`, each `@nogc nothrow` and taking an `L` by value or `ref`. A pointer lock's scope also has `L create()`, since its `.init` is null; any other lock's `.init` must be unlocked, and a `create` it has instead makes the monitor's lock.
 ///
-/// The scope may also have `bool tryReadLock(L)` and `bool tryWriteLock(L)`, which give the monitor `tryRead` and `tryWrite`, and `free(L)`, which `Monitor.finalize` calls on the lock.
+/// The scope may also have `bool tryLockForReading(L)` and `bool tryLockForWriting(L)`, which give the monitor `tryRead` and `tryWrite`, and `free(L)`, which `Monitor.finalize` calls on the lock.
 ///
 /// Examples:
 /// ---
@@ -40,16 +40,18 @@ private template lockScope(L) {
 /// static assert(!isLock!(bc.mutex.Mutex));
 /// static assert(!isLock!int);
 /// ---
-enum bool isLock(L) = __traits(compiles, lockScope!L) && is(typeof(lockScope!L.create()) == L) && __traits(compiles, (ref L l) @nogc nothrow {
-	lockScope!L.readLock(l);
-	lockScope!L.readUnlock(l);
-	lockScope!L.writeLock(l);
-	lockScope!L.writeUnlock(l);
+enum bool isLock(L) = __traits(compiles, lockScope!L) && (hasCreate!L ? is(typeof(lockScope!L.create()) == L) : !is(L == P*, P)) && __traits(compiles, (ref L l) @nogc nothrow {
+	lockScope!L.lockForReading(l);
+	lockScope!L.unlockForReading(l);
+	lockScope!L.lockForWriting(l);
+	lockScope!L.unlockForWriting(l);
 });
 
+private enum bool hasCreate(L) = __traits(compiles, lockScope!L.create());
+
 private enum bool hasTryLocks(L) = __traits(compiles, (ref L l) @nogc nothrow {
-	bool r = lockScope!L.tryReadLock(l);
-	bool w = lockScope!L.tryWriteLock(l);
+	bool r = lockScope!L.tryLockForReading(l);
+	bool w = lockScope!L.tryLockForWriting(l);
 });
 
 private enum bool hasFree(L) = __traits(compiles, (ref L l) @nogc nothrow { lockScope!L.free(l); });
@@ -59,7 +61,7 @@ private enum bool hasFree(L) = __traits(compiles, (ref L l) @nogc nothrow { lock
 
 /// A `T` reachable only through the guards `read` and `write` give, under a `Lock` meeting `isLock`.
 ///
-/// With the default `bc.spinlock.SpinLock`, `.init` is ready, holding `T.init`, so a `__gshared` monitor needs no `create`; going out of scope runs `T`'s destructor, but a `T` with a libfp `finalize` needs `fp.lifecycle.endLifetime` on the monitor. Any other lock comes from `create`, so its monitors do too; a pointer lock's `.init` is null. Like the plain data holding it, a monitor copies its lock and value bytewise: never copy a held one, and end only one copy of a pointer lock's monitor. It has the reentrancy and starvation caveats of its lock: under either lock in this library, a thread already holding it must not take it again.
+/// With the default `bc.spinlock.SpinLock`, `.init` is ready, holding `T.init`, so a `__gshared` monitor needs no `create`; going out of scope runs `T`'s destructor, but a `T` with a libfp `finalize` needs `fp.lifecycle.endLifetime` on the monitor. A pointer lock comes from its `create`, so its monitors do too, since its `.init` is null. Like the plain data holding it, a monitor copies its lock and value bytewise: never copy a held one, and end only one copy of a pointer lock's monitor. It has the reentrancy and starvation caveats of its lock: under either lock in this library, a thread already holding it must not take it again.
 ///
 /// Examples:
 /// ---
@@ -102,9 +104,10 @@ struct ReadGuard(T, Lock) {
 	@disable this(this);
 
 	~this() {
-		if(monitor !is null) lockScope!Lock.readUnlock(monitor.lock);
+		if(monitor !is null) lockScope!Lock.unlockForReading(monitor.lock);
 	}
 
+	// wrapper: the guarded value, as the alias this target
 	/// The guarded value, which a shared hold may only read.
 	///
 	/// Examples:
@@ -140,9 +143,10 @@ struct WriteGuard(T, Lock) {
 	@disable this(this);
 
 	~this() {
-		if(monitor !is null) lockScope!Lock.writeUnlock(monitor.lock);
+		if(monitor !is null) lockScope!Lock.unlockForWriting(monitor.lock);
 	}
 
+	// wrapper: the guarded value, as the alias this target
 	/// The guarded value, which the exclusive hold may change.
 	///
 	/// Examples:
@@ -168,7 +172,7 @@ struct WriteGuard(T, Lock) {
 
 // --- creation ----------------------------------------------------------------
 
-/// Allocates a monitor holding `value`, which is moved in, under a lock from `Lock`'s `create`. Free it with `fp.pointer.free`, which ends the value's lifetime and frees the lock through `Monitor.finalize`, once no thread holds it.
+/// Allocates a monitor holding `value`, which is moved in, under a lock from `Lock`'s `create`, or `Lock.init` if it has none. Free it with `fp.pointer.free`, which ends the value's lifetime and frees the lock through `Monitor.finalize`, once no thread holds it.
 ///
 /// Returns null, having freed what it allocated and leaving `value` as it was, if allocation is refused or `Lock` is a pointer and its `create` returns null.
 ///
@@ -181,14 +185,14 @@ struct WriteGuard(T, Lock) {
 /// ---
 Monitor!(T, Lock)* create(Lock = bc.spinlock.SpinLock, T)(T value) @trusted if(isLock!Lock) {
 	alias M = Monitor!(T, Lock);
-	auto m = fp.pointer.malloc!M(1);
+	auto m = fp.pointer.allocate!M(1);
 	if(m is null) return null;
 	// Copy `.init`'s bytes rather than assign it, which would run `T`'s destructor on the uninitialized block.
 	auto blank = __traits(initSymbol, M);
 	if(blank.ptr is null) core.stdc.string.memset(m, 0, M.sizeof);
 	else core.stdc.string.memcpy(m, blank.ptr, M.sizeof);
 
-	m.lock = lockScope!Lock.create();
+	static if(hasCreate!Lock) m.lock = lockScope!Lock.create();
 	static if(is(Lock == P*, P)) if(m.lock is null) {
 		fp.pointer.free(m);
 		return null;
@@ -208,11 +212,11 @@ Monitor!(T, Lock)* create(Lock = bc.spinlock.SpinLock, T)(T value) @trusted if(i
 /// assert(r.value == 0 && !tryWrite(m));
 /// ---
 ReadGuard!(T, Lock) read(T, Lock)(return ref Monitor!(T, Lock) m) @trusted {
-	lockScope!Lock.readLock(m.lock);
+	lockScope!Lock.lockForReading(m.lock);
 	return ReadGuard!(T, Lock)(&m);
 }
 
-/// Takes a shared hold on `m` without waiting; returns an empty guard, taking nothing, if a writer holds it. Defined only for a lock whose scope has `tryReadLock`.
+/// Takes a shared hold on `m` without waiting; returns an empty guard, taking nothing, if a writer holds it. Defined only for a lock whose scope has `tryLockForReading`.
 ///
 /// Examples:
 /// ---
@@ -221,7 +225,7 @@ ReadGuard!(T, Lock) read(T, Lock)(return ref Monitor!(T, Lock) m) @trusted {
 /// else assert(false);
 /// ---
 ReadGuard!(T, Lock) tryRead(T, Lock)(return ref Monitor!(T, Lock) m) @trusted if(hasTryLocks!Lock) {
-	if(!lockScope!Lock.tryReadLock(m.lock)) return ReadGuard!(T, Lock).init;
+	if(!lockScope!Lock.tryLockForReading(m.lock)) return ReadGuard!(T, Lock).init;
 	return ReadGuard!(T, Lock)(&m);
 }
 
@@ -236,11 +240,11 @@ ReadGuard!(T, Lock) tryRead(T, Lock)(return ref Monitor!(T, Lock) m) @trusted if
 /// assert(!tryRead(m));
 /// ---
 WriteGuard!(T, Lock) write(T, Lock)(return ref Monitor!(T, Lock) m) @trusted {
-	lockScope!Lock.writeLock(m.lock);
+	lockScope!Lock.lockForWriting(m.lock);
 	return WriteGuard!(T, Lock)(&m);
 }
 
-/// Takes the exclusive hold on `m` without waiting; returns an empty guard, taking nothing, if anyone holds it. Defined only for a lock whose scope has `tryWriteLock`.
+/// Takes the exclusive hold on `m` without waiting; returns an empty guard, taking nothing, if anyone holds it. Defined only for a lock whose scope has `tryLockForWriting`.
 ///
 /// Examples:
 /// ---
@@ -249,7 +253,7 @@ WriteGuard!(T, Lock) write(T, Lock)(return ref Monitor!(T, Lock) m) @trusted {
 /// assert(read(m).value == 1);
 /// ---
 WriteGuard!(T, Lock) tryWrite(T, Lock)(return ref Monitor!(T, Lock) m) @trusted if(hasTryLocks!Lock) {
-	if(!lockScope!Lock.tryWriteLock(m.lock)) return WriteGuard!(T, Lock).init;
+	if(!lockScope!Lock.tryLockForWriting(m.lock)) return WriteGuard!(T, Lock).init;
 	return WriteGuard!(T, Lock)(&m);
 }
 
@@ -262,11 +266,10 @@ version(unittest) {
 	@nogc nothrow:
 		static struct Lock { int readers = 0; bool writer = false; }
 
-		static Lock create() { return Lock.init; }
-		static void readLock(ref Lock l) { assert(!l.writer); ++l.readers; }
-		static void readUnlock(ref Lock l) { assert(l.readers > 0); --l.readers; }
-		static void writeLock(ref Lock l) { assert(!l.writer && l.readers == 0); l.writer = true; }
-		static void writeUnlock(ref Lock l) { assert(l.writer); l.writer = false; }
+		static void lockForReading(ref Lock l) { assert(!l.writer); ++l.readers; }
+		static void unlockForReading(ref Lock l) { assert(l.readers > 0); --l.readers; }
+		static void lockForWriting(ref Lock l) { assert(!l.writer && l.readers == 0); l.writer = true; }
+		static void unlockForWriting(ref Lock l) { assert(l.writer); l.writer = false; }
 	}
 
 	private struct Tracked {

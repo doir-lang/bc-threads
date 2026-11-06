@@ -9,6 +9,9 @@ On platforms without OS locks, `bc.mutex` falls back to it.
 `bc.interner` builds on it: a table any thread may intern sequences into at once, handing out dense ids and giving back each id's sequence without a lock.
 `bc.readerlock` shards a reader-writer spinlock so readers on different threads never share a cache line.
 `bc.monitor` keeps a value behind any of these locks, or any type that meets its `isLock`, handing out `const` access under a read hold and mutable access under the write hold.
+`bc.striped` pads a fixed set of locks to their own cache lines and picks one by key, and `bc.gate` is a stop-the-world gate: many threads share it, and one at a time takes it exclusively once the others pause at a safepoint.
+`bc.atomics.asShared` views a plain field as `shared` for `core.atomic`, and `bc.thread` has a portable `yield`, `sleep` and `monotonicMicroseconds`.
+`bc.channel.LocalChannel` is the channel for coroutines taking turns on one thread, in every build.
 
 Call these modules' functions fully qualified, as in `bc.threadpool.create(4)` or `bc.semaphore.post(s)`.
 Several modules define `create`, so after `import bc;` an unqualified `create` is ambiguous and does not compile.
@@ -50,7 +53,7 @@ A page may block only off its main thread, so [tests/wasi/run.mjs](tests/wasi/ru
 Shared memory also needs a cross-origin isolated page, so `--serve` sends the `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` headers.
 Output arrives a line at a time, so a hung test shows the module it stopped in but not the test index.
 A failed assertion on any thread aborts, which in wasm is a trap; the runner reports it as exit status 134.
-`bc.thread.hardwareConcurrency` reports 1 on WASI, which has no way to ask.
+`bc.thread.processorCount` reports 1 on WASI, which has no way to ask.
 
 ## Coverage
 

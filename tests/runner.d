@@ -12,6 +12,9 @@ private enum modules = [
 	"bc.readerlock",
 	"bc.monitor",
 	"bc.platform",
+	"bc.atomics",
+	"bc.striped",
+	"bc.gate",
 	"bc.interner",
 ];
 

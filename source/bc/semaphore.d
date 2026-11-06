@@ -58,7 +58,7 @@ static if(bc.platform.threadingSupported) {
 	/// ---
 	Semaphore* create(uint initial = 0) @trusted {
 		assert(initial <= maxCount, "bc.semaphore: initial count above maxCount");
-		auto s = fp.pointer.malloc!Semaphore(1);
+		auto s = fp.pointer.allocate!Semaphore(1);
 		if(s is null) return null;
 		*s = Semaphore.init;
 		bool failed = false;

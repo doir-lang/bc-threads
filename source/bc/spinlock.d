@@ -12,14 +12,6 @@ struct SpinLock {
 }
 
 
-/// An unlocked spinlock, the same as `SpinLock.init`; it lets `SpinLock` stand as a lock for `bc.monitor`, which makes its locks through their module's `create`. Never fails.
-///
-/// Examples:
-/// ---
-/// SpinLock l = bc.spinlock.create();
-/// assert(!isLocked(l));
-/// ---
-SpinLock create() { return SpinLock.init; }
 
 
 /// Whether readers or a writer hold `self`.
@@ -28,9 +20,9 @@ SpinLock create() { return SpinLock.init; }
 /// ---
 /// SpinLock l;
 /// assert(!isLocked(l));
-/// readLock(l);
+/// lockForReading(l);
 /// assert(isLocked(l));
-/// readUnlock(l);
+/// unlockForReading(l);
 /// ---
 bool isLocked(ref SpinLock self) @trusted {
 	return atomicLoad(self.state) != 0;
@@ -41,11 +33,11 @@ bool isLocked(ref SpinLock self) @trusted {
 /// Examples:
 /// ---
 /// SpinLock l;
-/// writeLock(l);
-/// assert(isWriteLocked(l));
-/// writeUnlock(l);
+/// lockForWriting(l);
+/// assert(isLockedForWriting(l));
+/// unlockForWriting(l);
 /// ---
-bool isWriteLocked(ref SpinLock self) @trusted {
+bool isLockedForWriting(ref SpinLock self) @trusted {
 	return atomicLoad(self.state) < 0;
 }
 
@@ -54,11 +46,11 @@ bool isWriteLocked(ref SpinLock self) @trusted {
 /// Examples:
 /// ---
 /// SpinLock l;
-/// readLock(l);
-/// assert(isReadLocked(l));
-/// readUnlock(l);
+/// lockForReading(l);
+/// assert(isLockedForReading(l));
+/// unlockForReading(l);
 /// ---
-bool isReadLocked(ref SpinLock self) @trusted {
+bool isLockedForReading(ref SpinLock self) @trusted {
 	return atomicLoad(self.state) > 0;
 }
 
@@ -67,12 +59,12 @@ bool isReadLocked(ref SpinLock self) @trusted {
 /// Examples:
 /// ---
 /// SpinLock l;
-/// assert(tryReadLock(l));
-/// assert(tryReadLock(l));
-/// readUnlock(l);
-/// readUnlock(l);
+/// assert(tryLockForReading(l));
+/// assert(tryLockForReading(l));
+/// unlockForReading(l);
+/// unlockForReading(l);
 /// ---
-bool tryReadLock(ref SpinLock self) @trusted {
+bool tryLockForReading(ref SpinLock self) @trusted {
 	int cur = atomicLoad!(MemoryOrder.raw)(self.state);
 	// A failed `cas` stores the value it found in `cur`, so the loop retries against that.
 	while(cur >= 0)
@@ -85,13 +77,13 @@ bool tryReadLock(ref SpinLock self) @trusted {
 /// Examples:
 /// ---
 /// SpinLock l;
-/// readLock(l);
-/// assert(!tryWriteLock(l));
-/// readUnlock(l);
+/// lockForReading(l);
+/// assert(!tryLockForWriting(l));
+/// unlockForReading(l);
 /// ---
-void readLock(ref SpinLock self) @trusted {
+void lockForReading(ref SpinLock self) @trusted {
 	// Spin on plain loads so waiters share the cache line, rather than each `cas` stealing it from the holder.
-	while(!tryReadLock(self))
+	while(!tryLockForReading(self))
 		while(atomicLoad!(MemoryOrder.raw)(self.state) < 0) pause();
 }
 
@@ -100,12 +92,12 @@ void readLock(ref SpinLock self) @trusted {
 /// Examples:
 /// ---
 /// SpinLock l;
-/// readLock(l);
-/// readUnlock(l);
+/// lockForReading(l);
+/// unlockForReading(l);
 /// assert(!isLocked(l));
 /// ---
-void readUnlock(ref SpinLock self) @trusted {
-	assert(atomicLoad!(MemoryOrder.raw)(self.state) > 0, "bc.spinlock: readUnlock of a lock that is not read-held");
+void unlockForReading(ref SpinLock self) @trusted {
+	assert(atomicLoad!(MemoryOrder.raw)(self.state) > 0, "bc.spinlock: unlockForReading of a lock that is not read-held");
 	atomicOp!"-="(self.state, 1);
 }
 
@@ -115,11 +107,11 @@ void readUnlock(ref SpinLock self) @trusted {
 /// Examples:
 /// ---
 /// SpinLock l;
-/// assert(tryWriteLock(l));
-/// assert(!tryWriteLock(l));
-/// writeUnlock(l);
+/// assert(tryLockForWriting(l));
+/// assert(!tryLockForWriting(l));
+/// unlockForWriting(l);
 /// ---
-bool tryWriteLock(ref SpinLock self) @trusted {
+bool tryLockForWriting(ref SpinLock self) @trusted {
 	return cas(&self.state, 0, -1);
 }
 
@@ -128,12 +120,12 @@ bool tryWriteLock(ref SpinLock self) @trusted {
 /// Examples:
 /// ---
 /// SpinLock l;
-/// writeLock(l);
-/// assert(!tryReadLock(l));
-/// writeUnlock(l);
+/// lockForWriting(l);
+/// assert(!tryLockForReading(l));
+/// unlockForWriting(l);
 /// ---
-void writeLock(ref SpinLock self) @trusted {
-	while(!tryWriteLock(self))
+void lockForWriting(ref SpinLock self) @trusted {
+	while(!tryLockForWriting(self))
 		while(atomicLoad!(MemoryOrder.raw)(self.state) != 0) pause();
 }
 
@@ -142,49 +134,49 @@ void writeLock(ref SpinLock self) @trusted {
 /// Examples:
 /// ---
 /// SpinLock l;
-/// writeLock(l);
-/// writeUnlock(l);
+/// lockForWriting(l);
+/// unlockForWriting(l);
 /// assert(!isLocked(l));
 /// ---
-void writeUnlock(ref SpinLock self) @trusted {
-	assert(atomicLoad!(MemoryOrder.raw)(self.state) == -1, "bc.spinlock: writeUnlock of a lock that is not write-held");
+void unlockForWriting(ref SpinLock self) @trusted {
+	assert(atomicLoad!(MemoryOrder.raw)(self.state) == -1, "bc.spinlock: unlockForWriting of a lock that is not write-held");
 	atomicStore!(MemoryOrder.rel)(self.state, 0);
 }
 
 
 unittest {
-	SpinLock l = create();
+	SpinLock l;
 	assert(!isLocked(l));
-	assert(tryReadLock(l));
-	readLock(l);
-	assert(isLocked(l) && isReadLocked(l) && !isWriteLocked(l));
-	assert(!tryWriteLock(l));
-	readUnlock(l);
-	readUnlock(l);
+	assert(tryLockForReading(l));
+	lockForReading(l);
+	assert(isLocked(l) && isLockedForReading(l) && !isLockedForWriting(l));
+	assert(!tryLockForWriting(l));
+	unlockForReading(l);
+	unlockForReading(l);
 	assert(!isLocked(l));
 
-	writeLock(l);
-	assert(isWriteLocked(l) && !isReadLocked(l));
-	assert(!tryReadLock(l) && !tryWriteLock(l));
-	writeUnlock(l);
+	lockForWriting(l);
+	assert(isLockedForWriting(l) && !isLockedForReading(l));
+	assert(!tryLockForReading(l) && !tryLockForWriting(l));
+	unlockForWriting(l);
 
 	static import bc.platform;
 	static if(bc.platform.threadingSupported) {
 		static import bc.thread;
 		static void takeAndRelease(SpinLock* l, bool write) @nogc nothrow {
-			if(write) { writeLock(*l); writeUnlock(*l); }
-			else { readLock(*l); readUnlock(*l); }
+			if(write) { lockForWriting(*l); unlockForWriting(*l); }
+			else { lockForReading(*l); unlockForReading(*l); }
 		}
 
 		// Another thread takes `l` the other way while this one holds it, so must spin until the release.
 		foreach(i; 0 .. 2) {
 			immutable write = i == 1;
-			if(write) readLock(l); else writeLock(l);
+			if(write) lockForReading(l); else lockForWriting(l);
 			auto t = bc.thread.create(&takeAndRelease, &l, write);
 			assert(!t.isNull);
 			// Nothing shows when the thread starts spinning; one that starts late still passes.
 			bc.platform.nap(10);
-			if(write) readUnlock(l); else writeUnlock(l);
+			if(write) unlockForReading(l); else unlockForWriting(l);
 			bc.thread.join(t.get);
 		}
 	}

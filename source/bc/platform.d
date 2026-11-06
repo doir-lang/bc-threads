@@ -11,8 +11,11 @@ else version(Windows) enum bool threadingSupported = true;
 else version(WASI) enum bool threadingSupported = __traits(targetHasFeature, "atomics");
 else enum bool threadingSupported = false;
 
+/// The bytes a value is padded to so threads writing neighbouring ones never share a cache line: 64 on the x86-64 and ARM cores this library targets.
+enum size_t cacheLineBytes = 64;
+
 /// Mixed in, declares `version(PthreadBackend)` on Linux, macOS and WASI. Version identifiers are module-local, so each module that branches on it mixes this in.
-enum string pthreadBackendMixin = q{
+enum string backendSelection = q{
 	version(linux) version = PthreadBackend;
 	else version(OSX) version = PthreadBackend;
 	else version(WASI) version = PthreadBackend;
@@ -40,10 +43,10 @@ version(unittest) {
 debug {
 	static import fp.pointer;
 
-	// Thread-local, like `fp.pointer.allocFunction`, so a failure armed on one thread is never consumed by another.
+	// Thread-local, like `fp.pointer.allocator`, so a failure armed on one thread is never consumed by another.
 	private bool failureArmed;
 	private size_t acquisitionsLeft;
-	private fp.pointer.AllocFunction realAllocFunction;
+	private fp.pointer.Allocator realAllocFunction;
 
 	/// Whether the acquisition the caller is about to make, an allocation or an OS object, should fail as `failAfter` arranged. It exists only in debug builds, so callers check it under `debug`.
 	///
@@ -55,7 +58,7 @@ debug {
 	package bool simulatedFailure() {
 		if(!failureArmed || acquisitionsLeft-- > 0) return false;
 		failureArmed = false;
-		fp.pointer.allocFunction = realAllocFunction;
+		fp.pointer.allocator = realAllocFunction;
 		return true;
 	}
 }
@@ -73,7 +76,7 @@ debug version(unittest) {
 	/// ---
 	/// debug {
 	/// 	failAfter(1);
-	/// 	int* p = fp.pointer.malloc!int(1);
+	/// 	int* p = fp.pointer.allocate!int(1);
 	/// 	assert(p !is null);
 	/// 	assert(simulatedFailure());
 	/// 	assert(!simulatedFailure());
@@ -82,18 +85,18 @@ debug version(unittest) {
 	/// ---
 	package void failAfter(size_t n) {
 		// Re-arming must not save the failing allocator as the real one, or every allocation would recurse forever.
-		if(!failureArmed) realAllocFunction = fp.pointer.allocFunction;
+		if(!failureArmed) realAllocFunction = fp.pointer.allocator;
 		acquisitionsLeft = n;
 		failureArmed = true;
-		fp.pointer.allocFunction = &failingAllocFunction;
+		fp.pointer.allocator = &failingAllocFunction;
 	}
 }
 
 debug unittest {
 	failAfter(3);
 	failAfter(0);
-	assert(fp.pointer.malloc!int(1) is null);
-	int* p = fp.pointer.malloc!int(1);
+	assert(fp.pointer.allocate!int(1) is null);
+	int* p = fp.pointer.allocate!int(1);
 	assert(p !is null);
 	fp.pointer.free(p);
 

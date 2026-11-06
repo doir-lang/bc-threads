@@ -13,7 +13,7 @@ import std.typecons : Nullable, nullable;
 
 @nogc nothrow:
 
-mixin(bc.platform.pthreadBackendMixin);
+mixin(bc.platform.backendSelection);
 
 /// Whether `Channel!T` accepts `T`: its buffer slots start uninitialized, so a type whose assignment, copy or destruction runs code would run it on garbage.
 ///
@@ -33,7 +33,7 @@ private T takeFront(T)(ref T* buffer, ref size_t head) @trusted {
 	T value = buffer[head];
 	buffer[head++] = T.init;
 	if(head * 2 >= fp.dynarray.length(buffer)) {
-		cast(void) fp.dynarray.deleteRange(buffer, 0, head);
+		cast(void) fp.dynarray.removeRange(buffer, 0, head);
 		head = 0;
 	}
 	return value;
@@ -46,10 +46,10 @@ static if(bc.platform.threadingSupported) {
 	///
 	/// Examples:
 	/// ---
-	/// Channel!int* ch = bc.channel.create!int(2);
-	/// assert(send(ch, 1));
-	/// assert(receive(ch).get == 1);
-	/// free(ch);
+	/// Channel!int* channel = bc.channel.create!int(2);
+	/// assert(send(channel, 1));
+	/// assert(receive(channel).get == 1);
+	/// free(channel);
 	/// ---
 	struct Channel(T) if(isChannelable!T) {
 		bc.semaphore.Semaphore* itemAvailable;
@@ -71,54 +71,54 @@ static if(bc.platform.threadingSupported) {
 		shared ptrdiff_t users = 0;
 	}
 
-	private void acquire(T)(Channel!T* ch) @trusted { bc.mutex.writeLock(ch.lock); }
-	private void release(T)(Channel!T* ch) @trusted { bc.mutex.writeUnlock(ch.lock); }
 
-	private void freeParts(T)(Channel!T* ch) @trusted {
-		bc.semaphore.free(ch.itemAvailable);
-		bc.semaphore.free(ch.spaceAvailable);
-		bc.mutex.free(ch.lock);
-		fp.dynarray.free(ch.buffer);
-		fp.pointer.free(ch);
+	private void freeParts(T)(Channel!T* channel) @trusted {
+		bc.semaphore.free(channel.itemAvailable);
+		bc.semaphore.free(channel.spaceAvailable);
+		bc.mutex.free(channel.lock);
+		fp.dynarray.free(channel.buffer);
+		fp.pointer.free(channel);
 	}
 
 
-	/// The capacity `ch` was created with.
+	// wrapper: reads a field of an opaque channel
+	/// The capacity `channel` was created with.
 	///
 	/// Examples:
 	/// ---
-	/// auto ch = bc.channel.create!int(dynamicExtent);
-	/// assert(capacity(ch) == dynamicExtent);
-	/// free(ch);
+	/// auto channel = bc.channel.create!int(dynamicExtent);
+	/// assert(capacity(channel) == dynamicExtent);
+	/// free(channel);
 	/// ---
-	size_t capacity(T)(const Channel!T* ch) { return ch.capacity; }
+	size_t capacity(T)(const Channel!T* channel) { return channel.capacity; }
 
-	/// How many values `ch` holds.
+	/// How many values `channel` holds.
 	///
 	/// Examples:
 	/// ---
-	/// auto ch = bc.channel.create!int(4);
-	/// assert(send(ch, 1));
-	/// assert(length(ch) == 1);
-	/// free(ch);
+	/// auto channel = bc.channel.create!int(4);
+	/// assert(send(channel, 1));
+	/// assert(length(channel) == 1);
+	/// free(channel);
 	/// ---
-	size_t length(T)(Channel!T* ch) @trusted {
-		acquire(ch);
-		immutable n = ch.count;
-		release(ch);
+	size_t length(T)(Channel!T* channel) @trusted {
+		bc.mutex.lockForWriting(channel.lock);
+		immutable n = channel.count;
+		bc.mutex.unlockForWriting(channel.lock);
 		return n;
 	}
 
-	/// Whether `close` has been called on `ch`.
+	// wrapper: reads a field of an opaque channel
+	/// Whether `close` has been called on `channel`.
 	///
 	/// Examples:
 	/// ---
-	/// auto ch = bc.channel.create!int(1);
-	/// close(ch);
-	/// assert(isClosed(ch));
-	/// free(ch);
+	/// auto channel = bc.channel.create!int(1);
+	/// close(channel);
+	/// assert(isClosed(channel));
+	/// free(channel);
 	/// ---
-	bool isClosed(T)(const Channel!T* ch) @trusted { return atomicLoad(ch.closed); }
+	bool isClosed(T)(const Channel!T* channel) @trusted { return atomicLoad(channel.closed); }
 
 
 	/// Creates an open, empty channel holding up to `capacity` values, which must be above zero, or any number of them with `dynamicExtent`. Several `bc` modules define `create`, so call it fully qualified, as `bc.channel.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
@@ -127,211 +127,294 @@ static if(bc.platform.threadingSupported) {
 	///
 	/// Examples:
 	/// ---
-	/// auto ch = bc.channel.create!int(4);
-	/// assert(ch !is null);
-	/// assert(capacity(ch) == 4);
-	/// free(ch);
+	/// auto channel = bc.channel.create!int(4);
+	/// assert(channel !is null);
+	/// assert(capacity(channel) == 4);
+	/// free(channel);
 	/// ---
 	Channel!T* create(T)(size_t capacity) @trusted {
 		assert(capacity > 0);
-		auto ch = fp.pointer.malloc!(Channel!T)(1);
-		if(ch is null) return null;
-		*ch = Channel!T.init;
-		ch.capacity = capacity;
+		auto channel = fp.pointer.allocate!(Channel!T)(1);
+		if(channel is null) return null;
+		*channel = Channel!T.init;
+		channel.capacity = capacity;
 		immutable bounded = capacity != dynamicExtent;
 		// A dynamic channel never fills, so no sender can ever wait for room.
 		if(bounded) {
-			ch.buffer = fp.dynarray.create!T(capacity);
-			ch.spaceAvailable = bc.semaphore.create();
+			channel.buffer = fp.dynarray.create!T(capacity);
+			channel.spaceAvailable = bc.semaphore.create();
 		}
 
 		// Both counts start at zero: every waiter rechecks the buffer under the lock, so a semaphore only needs to wake it.
-		ch.itemAvailable = bc.semaphore.create();
-		ch.lock = bc.mutex.create();
-		if((bounded && (ch.buffer is null || ch.spaceAvailable is null)) || ch.itemAvailable is null || ch.lock is null) {
-			freeParts(ch);
+		channel.itemAvailable = bc.semaphore.create();
+		channel.lock = bc.mutex.create();
+		if((bounded && (channel.buffer is null || channel.spaceAvailable is null)) || channel.itemAvailable is null || channel.lock is null) {
+			freeParts(channel);
 			return null;
 		}
-		return ch;
+		return channel;
 	}
 
 
-	/// Appends `value` to `ch`, first waiting for room if `ch` is full. Without threads, `ch` never fills, so `send` never waits.
+	/// Appends `value` to `channel`, first waiting for room if `channel` is full. Without threads, `channel` never fills, so `send` never waits.
 	///
-	/// Returns false, leaving `ch` unchanged, if `ch` is closed before `value` fits, or if `ch` is unbounded and its buffer cannot grow.
+	/// Returns false, leaving `channel` unchanged, if `channel` is closed before `value` fits, or if `channel` is unbounded and its buffer cannot grow.
 	///
 	/// Examples:
 	/// ---
-	/// auto ch = bc.channel.create!int(1);
-	/// assert(send(ch, 1));
-	/// close(ch);
-	/// assert(!send(ch, 2));
-	/// free(ch);
+	/// auto channel = bc.channel.create!int(1);
+	/// assert(send(channel, 1));
+	/// close(channel);
+	/// assert(!send(channel, 2));
+	/// free(channel);
 	/// ---
-	bool send(T)(Channel!T* ch, T value) @trusted {
-		immutable dynamic = ch.capacity == dynamicExtent;
-		atomicOp!"+="(ch.users, 1);
+	bool send(T)(Channel!T* channel, T value) @trusted {
+		immutable dynamic = channel.capacity == dynamicExtent;
+		atomicOp!"+="(channel.users, 1);
 		bool sent = false;
 		while(true) {
-			acquire(ch);
-			if(atomicLoad(ch.closed)) {
-				release(ch);
+			bc.mutex.lockForWriting(channel.lock);
+			if(atomicLoad(channel.closed)) {
+				bc.mutex.unlockForWriting(channel.lock);
 				break;
 			}
-			if(dynamic || ch.count < ch.capacity) {
-				if(dynamic && !fp.dynarray.pushBack(ch.buffer, value)) {
-					release(ch);
+			if(dynamic || channel.count < channel.capacity) {
+				if(dynamic && !fp.dynarray.pushBack(channel.buffer, value)) {
+					bc.mutex.unlockForWriting(channel.lock);
 					break;
 				}
-				if(!dynamic) ch.buffer[(ch.head + ch.count) % ch.capacity] = value;
-				ch.count++;
-				immutable wake = ch.receiversWaiting > 0;
-				if(wake) ch.receiversWaiting--;
-				release(ch);
-				if(wake) bc.semaphore.post(ch.itemAvailable);
+				if(!dynamic) channel.buffer[(channel.head + channel.count) % channel.capacity] = value;
+				channel.count++;
+				immutable wake = channel.receiversWaiting > 0;
+				if(wake) channel.receiversWaiting--;
+				bc.mutex.unlockForWriting(channel.lock);
+				if(wake) bc.semaphore.post(channel.itemAvailable);
 				sent = true;
 				break;
 			}
-			ch.sendersWaiting++;
-			release(ch);
-			bc.semaphore.wait(ch.spaceAvailable);
+			channel.sendersWaiting++;
+			bc.mutex.unlockForWriting(channel.lock);
+			bc.semaphore.wait(channel.spaceAvailable);
 		}
-		atomicOp!"-="(ch.users, 1);
+		atomicOp!"-="(channel.users, 1);
 		return sent;
 	}
 
-	/// Removes and returns the oldest value in `ch`, first waiting for one if `ch` is empty.
+	/// Removes and returns the oldest value in `channel`, first waiting for one if `channel` is empty.
 	///
-	/// Returns an empty `Nullable` once `ch` is closed and empty. Without threads an empty `ch` returns an empty `Nullable` at once, since nothing could fill it while `receive` waited.
+	/// Returns an empty `Nullable` once `channel` is closed and empty. Without threads an empty `channel` returns an empty `Nullable` at once, since nothing could fill it while `receive` waited.
 	///
 	/// Examples:
 	/// ---
-	/// auto ch = bc.channel.create!int(2);
-	/// assert(send(ch, 7));
-	/// close(ch);
-	/// assert(receive(ch).get == 7);
-	/// assert(receive(ch).isNull);
-	/// free(ch);
+	/// auto channel = bc.channel.create!int(2);
+	/// assert(send(channel, 7));
+	/// close(channel);
+	/// assert(receive(channel).get == 7);
+	/// assert(receive(channel).isNull);
+	/// free(channel);
 	/// ---
-	Nullable!T receive(T)(Channel!T* ch) @trusted {
-		immutable dynamic = ch.capacity == dynamicExtent;
-		atomicOp!"+="(ch.users, 1);
+	Nullable!T receive(T)(Channel!T* channel) @trusted {
+		immutable dynamic = channel.capacity == dynamicExtent;
+		atomicOp!"+="(channel.users, 1);
 		Nullable!T value = Nullable!T.init;
 		while(true) {
-			acquire(ch);
-			if(ch.count > 0) {
+			bc.mutex.lockForWriting(channel.lock);
+			if(channel.count > 0) {
 				T taken;
-				if(dynamic) taken = takeFront(ch.buffer, ch.head);
+				if(dynamic) taken = takeFront(channel.buffer, channel.head);
 				else {
-					taken = ch.buffer[ch.head];
+					taken = channel.buffer[channel.head];
 					// Leaving the copy would keep whatever it references alive until a later send overwrites the slot.
-					ch.buffer[ch.head] = T.init;
-					ch.head = (ch.head + 1) % ch.capacity;
+					channel.buffer[channel.head] = T.init;
+					channel.head = (channel.head + 1) % channel.capacity;
 				}
-				ch.count--;
-				immutable wake = ch.sendersWaiting > 0;
-				if(wake) ch.sendersWaiting--;
-				release(ch);
-				if(wake) bc.semaphore.post(ch.spaceAvailable);
+				channel.count--;
+				immutable wake = channel.sendersWaiting > 0;
+				if(wake) channel.sendersWaiting--;
+				bc.mutex.unlockForWriting(channel.lock);
+				if(wake) bc.semaphore.post(channel.spaceAvailable);
 				value = nullable(taken);
 				break;
 			}
-			if(atomicLoad(ch.closed)) { release(ch); break; }
-			ch.receiversWaiting++;
-			release(ch);
-			bc.semaphore.wait(ch.itemAvailable);
+			if(atomicLoad(channel.closed)) { bc.mutex.unlockForWriting(channel.lock); break; }
+			channel.receiversWaiting++;
+			bc.mutex.unlockForWriting(channel.lock);
+			bc.semaphore.wait(channel.itemAvailable);
 		}
-		atomicOp!"-="(ch.users, 1);
+		atomicOp!"-="(channel.users, 1);
 		return value;
 	}
 
 
-	/// Closes `ch`: later sends fail, and threads waiting in `send` or `receive` on it wake. Values already in `ch` can still be received.
+	/// Closes `channel`: later sends fail, and threads waiting in `send` or `receive` on it wake. Values already in `channel` can still be received.
 	///
 	/// Examples:
 	/// ---
-	/// auto ch = bc.channel.create!int(1);
-	/// close(ch);
-	/// assert(!send(ch, 1));
-	/// free(ch);
+	/// auto channel = bc.channel.create!int(1);
+	/// close(channel);
+	/// assert(!send(channel, 1));
+	/// free(channel);
 	/// ---
-	void close(T)(Channel!T* ch) @trusted {
-		acquire(ch);
-		atomicStore(ch.closed, true);
-		immutable senders = ch.sendersWaiting;
-		immutable receivers = ch.receiversWaiting;
-		ch.sendersWaiting = ch.receiversWaiting = 0;
-		release(ch);
-		foreach(_; 0 .. senders) bc.semaphore.post(ch.spaceAvailable);
-		foreach(_; 0 .. receivers) bc.semaphore.post(ch.itemAvailable);
+	void close(T)(Channel!T* channel) @trusted {
+		bc.mutex.lockForWriting(channel.lock);
+		atomicStore(channel.closed, true);
+		immutable senders = channel.sendersWaiting;
+		immutable receivers = channel.receiversWaiting;
+		channel.sendersWaiting = channel.receiversWaiting = 0;
+		bc.mutex.unlockForWriting(channel.lock);
+		foreach(_; 0 .. senders) bc.semaphore.post(channel.spaceAvailable);
+		foreach(_; 0 .. receivers) bc.semaphore.post(channel.itemAvailable);
 	}
 
-	/// Closes and frees `ch`; does nothing if `ch` is null. Threads blocked in `send` or `receive` are woken and waited for before anything is destroyed, so freeing a channel others are blocked on is safe, though starting a new `send` or `receive` on it after is not. Freeing `ch` twice is undefined.
+	/// Closes and frees `channel`; does nothing if `channel` is null. Threads blocked in `send` or `receive` are woken and waited for before anything is destroyed, so freeing a channel others are blocked on is safe, though starting a new `send` or `receive` on it after is not. Freeing `channel` twice is undefined.
 	///
 	/// Examples:
 	/// ---
-	/// auto ch = bc.channel.create!int(1);
-	/// free(ch);
-	/// free!int(null);
+	/// auto channel = bc.channel.create!int(1);
+	/// free(channel);
+	/// free!int(cast(Channel!int*) null);
 	/// ---
-	void free(T)(Channel!T* ch) @trusted {
-		if(ch is null) return;
-		close(ch);
+	void free(T)(Channel!T* channel) @trusted {
+		if(channel is null) return;
+		close(channel);
 		// A woken waiter still reads the channel, so it must leave before any part of it is destroyed.
-		while(atomicLoad(ch.users) > 0) pause();
-		freeParts(ch);
+		while(atomicLoad(channel.users) > 0) pause();
+		freeParts(channel);
 	}
 
-} else {
-
-	// Without threads nothing could fill an empty channel or drain a full one, so every capacity behaves as `dynamicExtent`.
-	struct Channel(T) if(isChannelable!T) {
-		T* buffer = null;
-		size_t head = 0;
-		size_t capacity = 0;
-		bool closed = false;
-	}
-
-
-	size_t capacity(T)(const Channel!T* ch) { return ch.capacity; }
-	size_t length(T)(Channel!T* ch) @trusted { return fp.dynarray.length(ch.buffer) - ch.head; }
-	bool isClosed(T)(const Channel!T* ch) { return ch.closed; }
-
-
-	Channel!T* create(T)(size_t capacity) @trusted {
-		assert(capacity > 0);
-		auto ch = fp.pointer.malloc!(Channel!T)(1);
-		if(ch is null) return null;
-		*ch = Channel!T.init;
-		ch.capacity = capacity;
-		if(capacity != dynamicExtent && fp.dynarray.reserve(ch.buffer, capacity) is null) {
-			fp.pointer.free(ch);
-			return null;
-		}
-		return ch;
-	}
-
-
-	bool send(T)(Channel!T* ch, T value) @trusted {
-		if(ch.closed) return false;
-		return fp.dynarray.pushBack(ch.buffer, value);
-	}
-
-	Nullable!T receive(T)(Channel!T* ch) @trusted {
-		if(length(ch) == 0) return Nullable!T.init;
-		return nullable(takeFront(ch.buffer, ch.head));
-	}
-
-
-	void close(T)(Channel!T* ch) { ch.closed = true; }
-
-	void free(T)(Channel!T* ch) @trusted {
-		if(ch is null) return;
-		fp.dynarray.free(ch.buffer);
-		fp.pointer.free(ch);
-	}
 }
 
+
+// --- channels within one thread ------------------------------------------------
+
+/// A channel of `T` values that one thread, or coroutines taking turns on one thread, send through: an unbounded queue with the channel's operations, whose `receive` never waits. Without threads it is `Channel`, since nothing could fill an empty channel or drain a full one while a call waited. Used through the pointer `createLocal` returns; its fields belong to the implementation.
+///
+/// Examples:
+/// ---
+/// LocalChannel!int* channel = createLocal!int();
+/// assert(send(channel, 1) && send(channel, 2));
+/// assert(receive(channel).get == 1 && length(channel) == 1);
+/// free(channel);
+/// ---
+struct LocalChannel(T) if(isChannelable!T) {
+	T* buffer = null;
+	size_t head = 0;
+	size_t capacity = dynamicExtent;
+	bool closed = false;
+}
+
+// wrapper: reads a field of an opaque channel
+/// The capacity `channel` was created with; a local channel never makes a sender wait, whatever it is.
+///
+/// Examples:
+/// ---
+/// auto channel = createLocal!int(3);
+/// assert(capacity(channel) == 3);
+/// free(channel);
+/// ---
+size_t capacity(T)(const LocalChannel!T* channel) { return channel.capacity; }
+
+/// How many values `channel` holds.
+///
+/// Examples:
+/// ---
+/// auto channel = createLocal!int();
+/// assert(send(channel, 1) && length(channel) == 1);
+/// free(channel);
+/// ---
+size_t length(T)(const LocalChannel!T* channel) @trusted { return fp.dynarray.length(channel.buffer) - channel.head; }
+
+// wrapper: reads a field of an opaque channel
+/// Whether `close` has been called on `channel`.
+///
+/// Examples:
+/// ---
+/// auto channel = createLocal!int();
+/// close(channel);
+/// assert(isClosed(channel));
+/// free(channel);
+/// ---
+bool isClosed(T)(const LocalChannel!T* channel) { return channel.closed; }
+
+/// Creates an open, empty local channel, reserving room for `capacity` values unless it is `dynamicExtent`, the default. Returns null if allocation fails.
+///
+/// Examples:
+/// ---
+/// auto channel = createLocal!int(4);
+/// assert(channel !is null);
+/// free(channel);
+/// ---
+LocalChannel!T* createLocal(T)(size_t capacity = dynamicExtent) @trusted {
+	assert(capacity > 0);
+	auto channel = fp.pointer.allocate!(LocalChannel!T)(1);
+	if(channel is null) return null;
+	*channel = LocalChannel!T.init;
+	channel.capacity = capacity;
+	if(capacity != dynamicExtent && fp.dynarray.reserve(channel.buffer, capacity) is null) {
+		fp.pointer.free(channel);
+		return null;
+	}
+	return channel;
+}
+
+/// Adds `value` to `channel`. Returns false if `channel` is closed or could not grow, leaving it as it was.
+///
+/// Examples:
+/// ---
+/// auto channel = createLocal!int();
+/// assert(send(channel, 5));
+/// free(channel);
+/// ---
+bool send(T)(LocalChannel!T* channel, T value) @trusted {
+	if(channel.closed) return false;
+	return fp.dynarray.pushBack(channel.buffer, value);
+}
+
+/// Removes and returns the oldest value in `channel`, or an empty `Nullable` if it holds none; it never waits. Each costs amortized O(1).
+///
+/// Examples:
+/// ---
+/// auto channel = createLocal!int();
+/// assert(receive(channel).isNull);
+/// assert(send(channel, 7) && receive(channel).get == 7);
+/// free(channel);
+/// ---
+Nullable!T receive(T)(LocalChannel!T* channel) @trusted {
+	if(length(channel) == 0) return Nullable!T.init;
+	return nullable(takeFront(channel.buffer, channel.head));
+}
+
+/// Closes `channel`: later sends fail, though values already in it can still be received.
+///
+/// Examples:
+/// ---
+/// auto channel = createLocal!int();
+/// close(channel);
+/// assert(!send(channel, 1));
+/// free(channel);
+/// ---
+void close(T)(LocalChannel!T* channel) { channel.closed = true; }
+
+/// Frees `channel` and the values it holds; does nothing if `channel` is null.
+///
+/// Examples:
+/// ---
+/// auto channel = createLocal!int();
+/// free(channel);
+/// free!int(cast(LocalChannel!int*) null);
+/// ---
+void free(T)(LocalChannel!T* channel) @trusted {
+	if(channel is null) return;
+	fp.dynarray.free(channel.buffer);
+	fp.pointer.free(channel);
+}
+
+static if(!bc.platform.threadingSupported) {
+	/// Without threads every channel is a `LocalChannel`, made by `create` as by `createLocal`.
+	alias Channel = LocalChannel;
+	/// Ditto
+	alias create = createLocal;
+}
 
 unittest {
 	// Fails each acquisition in turn: channel, buffer, then with threads each semaphore and its OS object, the lock, and any rwlock.
@@ -342,7 +425,7 @@ unittest {
 		bc.platform.failAfter(i);
 		assert(create!int(1) is null);
 	}
-	free!int(null);
+	free!int(cast(Channel!int*) null);
 	static struct Owner { ~this() @nogc nothrow {} }
 	static assert(!__traits(compiles, Channel!Owner) && !__traits(compiles, create!Owner(1)));
 
@@ -371,33 +454,33 @@ unittest {
 	static if(bc.platform.threadingSupported) {
 		static import bc.thread;
 
-		static void sendTwo(Channel!int* ch, bool* ok) @nogc nothrow { *ok = send(ch, 2); }
-		static void receiveOne(Channel!int* ch, bool* ok) @nogc nothrow { *ok = !receive(ch).isNull; }
-		static size_t blocked(Channel!int* ch, bool senders) @nogc nothrow {
-			acquire(ch);
-			immutable n = senders ? ch.sendersWaiting : ch.receiversWaiting;
-			release(ch);
+		static void sendTwo(Channel!int* channel, bool* ok) @nogc nothrow { *ok = send(channel, 2); }
+		static void receiveOne(Channel!int* channel, bool* ok) @nogc nothrow { *ok = !receive(channel).isNull; }
+		static size_t blocked(Channel!int* channel, bool senders) @nogc nothrow {
+			bc.mutex.lockForWriting(channel.lock);
+			immutable n = senders ? channel.sendersWaiting : channel.receiversWaiting;
+			bc.mutex.unlockForWriting(channel.lock);
 			return n;
 		}
 
-		auto ch = create!int(1);
-		assert(ch !is null);
-		scope(exit) free(ch);
-		assert(send(ch, 1));
+		auto channel = create!int(1);
+		assert(channel !is null);
+		scope(exit) free(channel);
+		assert(send(channel, 1));
 
 		// The sender waits on the full channel until a receive makes room; the receiver waits on the empty one until `close` wakes it.
 		bool sent = false, received = true;
-		auto t = bc.thread.create(&sendTwo, ch, &sent);
+		auto t = bc.thread.create(&sendTwo, channel, &sent);
 		assert(!t.isNull);
-		while(blocked(ch, true) == 0) {}
-		assert(receive(ch).get == 1);
+		while(blocked(channel, true) == 0) {}
+		assert(receive(channel).get == 1);
 		bc.thread.join(t.get);
-		assert(sent && receive(ch).get == 2);
+		assert(sent && receive(channel).get == 2);
 
-		t = bc.thread.create(&receiveOne, ch, &received);
+		t = bc.thread.create(&receiveOne, channel, &received);
 		assert(!t.isNull);
-		while(blocked(ch, false) == 0) {}
-		close(ch);
+		while(blocked(channel, false) == 0) {}
+		close(channel);
 		bc.thread.join(t.get);
 		assert(!received);
 
@@ -411,7 +494,7 @@ unittest {
 
 		// `free` wakes threads blocked in `receive` and waits for them to return before destroying what they read.
 		static shared size_t left;
-		static void receiveThenMark(Channel!int* ch) @nogc nothrow { receive(ch); atomicOp!"+="(left, 1); }
+		static void receiveThenMark(Channel!int* channel) @nogc nothrow { receive(channel); atomicOp!"+="(left, 1); }
 		auto closing = create!int(1);
 		assert(closing !is null);
 		enum waiters = 16;
@@ -423,7 +506,25 @@ unittest {
 		// Every receiver must be inside `receive` before `free`, since entering it afterwards would touch freed memory.
 		while(blocked(closing, false) < waiters) {}
 		free(closing);
-		assert(atomicLoad(left) == waiters);
+		// Each receiver marks itself only after `receive` returns, so the count is whole once they are joined, not when `free` returns.
 		foreach(ref waiter; blockedThreads) bc.thread.join(waiter.get);
+		assert(atomicLoad(left) == waiters);
+	}
+}
+
+unittest { // a local channel keeps order across the shifts that keep each receive O(1), in any build
+	auto local = createLocal!int();
+	assert(local !is null);
+	scope(exit) free(local);
+	foreach(round; 0 .. 3) {
+		foreach(i; 0 .. 10) assert(send(local, round * 10 + i));
+		foreach(i; 0 .. 10) assert(receive(local).get == round * 10 + i);
+	}
+	assert(receive(local).isNull && length(local) == 0);
+	close(local);
+	assert(isClosed(local) && !send(local, 1));
+	debug foreach(i; 0 .. 2) {
+		bc.platform.failAfter(i);
+		assert(createLocal!int(4) is null);
 	}
 }
