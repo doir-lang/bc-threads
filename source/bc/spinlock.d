@@ -12,6 +12,16 @@ struct SpinLock {
 }
 
 
+/// An unlocked spinlock, the same as `SpinLock.init`; it lets `SpinLock` stand as a lock for `bc.monitor`, which makes its locks through their module's `create`. Never fails.
+///
+/// Examples:
+/// ---
+/// SpinLock l = bc.spinlock.create();
+/// assert(!isLocked(l));
+/// ---
+SpinLock create() { return SpinLock.init; }
+
+
 /// Whether readers or a writer hold `self`.
 ///
 /// Examples:
@@ -143,7 +153,8 @@ void writeUnlock(ref SpinLock self) @trusted {
 
 
 unittest {
-	SpinLock l;
+	SpinLock l = create();
+	assert(!isLocked(l));
 	assert(tryReadLock(l));
 	readLock(l);
 	assert(isLocked(l) && isReadLocked(l) && !isWriteLocked(l));

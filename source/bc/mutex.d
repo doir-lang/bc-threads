@@ -170,7 +170,8 @@ static if(bc.platform.threadingSupported) {
 
 	static import bc.spinlock;
 
-	alias Mutex = bc.spinlock.SpinLock;
+	// A struct of its own, not an alias of `SpinLock`, so `bc.monitor` finds this module's functions for a `Mutex*`.
+	struct Mutex { bc.spinlock.SpinLock lock; }
 
 
 	Mutex* create() @trusted {
@@ -183,14 +184,14 @@ static if(bc.platform.threadingSupported) {
 	void free(Mutex* m) @trusted { fp.pointer.free(m); }
 
 
-	bool tryReadLock(Mutex* m) @trusted { return bc.spinlock.tryReadLock(*m); }
-	void readLock(Mutex* m) @trusted { bc.spinlock.readLock(*m); }
-	void readUnlock(Mutex* m) @trusted { bc.spinlock.readUnlock(*m); }
+	bool tryReadLock(Mutex* m) @trusted { return bc.spinlock.tryReadLock(m.lock); }
+	void readLock(Mutex* m) @trusted { bc.spinlock.readLock(m.lock); }
+	void readUnlock(Mutex* m) @trusted { bc.spinlock.readUnlock(m.lock); }
 
 
-	bool tryWriteLock(Mutex* m) @trusted { return bc.spinlock.tryWriteLock(*m); }
-	void writeLock(Mutex* m) @trusted { bc.spinlock.writeLock(*m); }
-	void writeUnlock(Mutex* m) @trusted { bc.spinlock.writeUnlock(*m); }
+	bool tryWriteLock(Mutex* m) @trusted { return bc.spinlock.tryWriteLock(m.lock); }
+	void writeLock(Mutex* m) @trusted { bc.spinlock.writeLock(m.lock); }
+	void writeUnlock(Mutex* m) @trusted { bc.spinlock.writeUnlock(m.lock); }
 
 }
 

@@ -7,6 +7,8 @@ See the DDoc on `submit`, `wait` and `run` in [source/bc/threadpool.d](source/bc
 Alongside the pool: `bc.mutex` (a reader-writer lock), `bc.semaphore`, `bc.channel`, `bc.thread`, and `bc.spinlock`, a reader-writer spinlock whose `.init` is unlocked, so a `__gshared` one needs no `create` or lazy initialization.
 On platforms without OS locks, `bc.mutex` falls back to it.
 `bc.interner` builds on it: a table any thread may intern sequences into at once, handing out dense ids and giving back each id's sequence without a lock.
+`bc.readerlock` shards a reader-writer spinlock so readers on different threads never share a cache line.
+`bc.monitor` keeps a value behind any of these locks, or any type that meets its `isLock`, handing out `const` access under a read hold and mutable access under the write hold.
 
 Call these modules' functions fully qualified, as in `bc.threadpool.create(4)` or `bc.semaphore.post(s)`.
 Several modules define `create`, so after `import bc;` an unqualified `create` is ambiguous and does not compile.
