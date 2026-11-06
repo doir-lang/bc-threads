@@ -7,9 +7,9 @@ static import bc.semaphore;
 static import fp.dynarray;
 static import fp.pointer;
 
-import core.atomic : atomicLoad, atomicOp, atomicStore, pause;
-import std.traits : hasElaborateAssign, hasElaborateCopyConstructor, hasElaborateDestructor;
-import std.typecons : Nullable, nullable;
+static import core.atomic;
+static import std.traits;
+static import std.typecons;
 
 @nogc nothrow:
 
@@ -23,7 +23,7 @@ mixin(bc.platform.backendSelection);
 /// static assert(isChannelable!int);
 /// static assert(!isChannelable!Owner);
 /// ---
-enum bool isChannelable(T) = !hasElaborateAssign!T && !hasElaborateCopyConstructor!T && !hasElaborateDestructor!T;
+enum bool isChannelable(T) = !std.traits.hasElaborateAssign!T && !std.traits.hasElaborateCopyConstructor!T && !std.traits.hasElaborateDestructor!T;
 
 /// Passed to `create` as the capacity, makes the channel unbounded, so `send` never waits.
 enum size_t dynamicExtent = size_t.max;
@@ -118,7 +118,7 @@ static if(bc.platform.threadingSupported) {
 	/// assert(isClosed(channel));
 	/// free(channel);
 	/// ---
-	bool isClosed(T)(const Channel!T* channel) @trusted { return atomicLoad(channel.closed); }
+	bool isClosed(T)(const Channel!T* channel) @trusted { return core.atomic.atomicLoad(channel.closed); }
 
 
 	/// Creates an open, empty channel holding up to `capacity` values, which must be above zero, or any number of them with `dynamicExtent`. Several `bc` modules define `create`, so call it fully qualified, as `bc.channel.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
@@ -170,11 +170,11 @@ static if(bc.platform.threadingSupported) {
 	/// ---
 	bool send(T)(Channel!T* channel, T value) @trusted {
 		immutable dynamic = channel.capacity == dynamicExtent;
-		atomicOp!"+="(channel.users, 1);
+		core.atomic.atomicOp!"+="(channel.users, 1);
 		bool sent = false;
 		while(true) {
 			bc.mutex.lockForWriting(channel.lock);
-			if(atomicLoad(channel.closed)) {
+			if(core.atomic.atomicLoad(channel.closed)) {
 				bc.mutex.unlockForWriting(channel.lock);
 				break;
 			}
@@ -196,7 +196,7 @@ static if(bc.platform.threadingSupported) {
 			bc.mutex.unlockForWriting(channel.lock);
 			bc.semaphore.wait(channel.spaceAvailable);
 		}
-		atomicOp!"-="(channel.users, 1);
+		core.atomic.atomicOp!"-="(channel.users, 1);
 		return sent;
 	}
 
@@ -213,10 +213,10 @@ static if(bc.platform.threadingSupported) {
 	/// assert(receive(channel).isNull);
 	/// free(channel);
 	/// ---
-	Nullable!T receive(T)(Channel!T* channel) @trusted {
+	std.typecons.Nullable!T receive(T)(Channel!T* channel) @trusted {
 		immutable dynamic = channel.capacity == dynamicExtent;
-		atomicOp!"+="(channel.users, 1);
-		Nullable!T value = Nullable!T.init;
+		core.atomic.atomicOp!"+="(channel.users, 1);
+		std.typecons.Nullable!T value = std.typecons.Nullable!T.init;
 		while(true) {
 			bc.mutex.lockForWriting(channel.lock);
 			if(channel.count > 0) {
@@ -233,15 +233,15 @@ static if(bc.platform.threadingSupported) {
 				if(wake) channel.sendersWaiting--;
 				bc.mutex.unlockForWriting(channel.lock);
 				if(wake) bc.semaphore.post(channel.spaceAvailable);
-				value = nullable(taken);
+				value = std.typecons.nullable(taken);
 				break;
 			}
-			if(atomicLoad(channel.closed)) { bc.mutex.unlockForWriting(channel.lock); break; }
+			if(core.atomic.atomicLoad(channel.closed)) { bc.mutex.unlockForWriting(channel.lock); break; }
 			channel.receiversWaiting++;
 			bc.mutex.unlockForWriting(channel.lock);
 			bc.semaphore.wait(channel.itemAvailable);
 		}
-		atomicOp!"-="(channel.users, 1);
+		core.atomic.atomicOp!"-="(channel.users, 1);
 		return value;
 	}
 
@@ -257,7 +257,7 @@ static if(bc.platform.threadingSupported) {
 	/// ---
 	void close(T)(Channel!T* channel) @trusted {
 		bc.mutex.lockForWriting(channel.lock);
-		atomicStore(channel.closed, true);
+		core.atomic.atomicStore(channel.closed, true);
 		immutable senders = channel.sendersWaiting;
 		immutable receivers = channel.receiversWaiting;
 		channel.sendersWaiting = channel.receiversWaiting = 0;
@@ -278,7 +278,7 @@ static if(bc.platform.threadingSupported) {
 		if(channel is null) return;
 		close(channel);
 		// A woken waiter still reads the channel, so it must leave before any part of it is destroyed.
-		while(atomicLoad(channel.users) > 0) pause();
+		while(core.atomic.atomicLoad(channel.users) > 0) core.atomic.pause();
 		freeParts(channel);
 	}
 
@@ -379,9 +379,9 @@ bool send(T)(LocalChannel!T* channel, T value) @trusted {
 /// assert(send(channel, 7) && receive(channel).get == 7);
 /// free(channel);
 /// ---
-Nullable!T receive(T)(LocalChannel!T* channel) @trusted {
-	if(length(channel) == 0) return Nullable!T.init;
-	return nullable(takeFront(channel.buffer, channel.head));
+std.typecons.Nullable!T receive(T)(LocalChannel!T* channel) @trusted {
+	if(length(channel) == 0) return std.typecons.Nullable!T.init;
+	return std.typecons.nullable(takeFront(channel.buffer, channel.head));
 }
 
 /// Closes `channel`: later sends fail, though values already in it can still be received.
@@ -412,7 +412,7 @@ void free(T)(LocalChannel!T* channel) @trusted {
 static if(!bc.platform.threadingSupported) {
 	/// Without threads every channel is a `LocalChannel`, made by `create` as by `createLocal`.
 	alias Channel = LocalChannel;
-	/// Ditto
+	/// With no threads to share a channel between, `create` makes a `LocalChannel`, exactly as `createLocal` does.
 	alias create = createLocal;
 }
 
@@ -494,11 +494,11 @@ unittest {
 
 		// `free` wakes threads blocked in `receive` and waits for them to return before destroying what they read.
 		static shared size_t left;
-		static void receiveThenMark(Channel!int* channel) @nogc nothrow { receive(channel); atomicOp!"+="(left, 1); }
+		static void receiveThenMark(Channel!int* channel) @nogc nothrow { receive(channel); core.atomic.atomicOp!"+="(left, 1); }
 		auto closing = create!int(1);
 		assert(closing !is null);
 		enum waiters = 16;
-		Nullable!(bc.thread.Thread)[waiters] blockedThreads;
+		std.typecons.Nullable!(bc.thread.Thread)[waiters] blockedThreads;
 		foreach(ref waiter; blockedThreads) {
 			waiter = bc.thread.create(&receiveThenMark, closing);
 			assert(!waiter.isNull);
@@ -508,7 +508,7 @@ unittest {
 		free(closing);
 		// Each receiver marks itself only after `receive` returns, so the count is whole once they are joined, not when `free` returns.
 		foreach(ref waiter; blockedThreads) bc.thread.join(waiter.get);
-		assert(atomicLoad(left) == waiters);
+		assert(core.atomic.atomicLoad(left) == waiters);
 	}
 }
 

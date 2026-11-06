@@ -29,6 +29,15 @@ private template lockScope(L) {
 	else alias lockScope = __traits(parent, L);
 }
 
+private enum bool hasCreate(L) = __traits(compiles, lockScope!L.create());
+
+private enum bool hasTryLocks(L) = __traits(compiles, (ref L l) @nogc nothrow {
+	bool r = lockScope!L.tryLockForReading(l);
+	bool w = lockScope!L.tryLockForWriting(l);
+});
+
+private enum bool hasFree(L) = __traits(compiles, (ref L l) @nogc nothrow { lockScope!L.free(l); });
+
 /// Whether `L` can lock a `Monitor`: the module (or other scope) declaring `L`, or its pointee when `L` is a pointer, has free functions `lockForReading`, `unlockForReading`, `lockForWriting` and `unlockForWriting`, each `@nogc nothrow` and taking an `L` by value or `ref`. A pointer lock's scope also has `L create()`, since its `.init` is null; any other lock's `.init` must be unlocked, and a `create` it has instead makes the monitor's lock.
 ///
 /// The scope may also have `bool tryLockForReading(L)` and `bool tryLockForWriting(L)`, which give the monitor `tryRead` and `tryWrite`, and `free(L)`, which `Monitor.finalize` calls on the lock.
@@ -46,15 +55,6 @@ enum bool isLock(L) = __traits(compiles, lockScope!L) && (hasCreate!L ? is(typeo
 	lockScope!L.lockForWriting(l);
 	lockScope!L.unlockForWriting(l);
 });
-
-private enum bool hasCreate(L) = __traits(compiles, lockScope!L.create());
-
-private enum bool hasTryLocks(L) = __traits(compiles, (ref L l) @nogc nothrow {
-	bool r = lockScope!L.tryLockForReading(l);
-	bool w = lockScope!L.tryLockForWriting(l);
-});
-
-private enum bool hasFree(L) = __traits(compiles, (ref L l) @nogc nothrow { lockScope!L.free(l); });
 
 
 // --- types and layout --------------------------------------------------------
@@ -184,13 +184,13 @@ struct WriteGuard(T, Lock) {
 /// assert(read(*m).value == 1);
 /// ---
 Monitor!(T, Lock)* create(Lock = bc.spinlock.SpinLock, T)(T value) @trusted if(isLock!Lock) {
-	alias M = Monitor!(T, Lock);
-	auto m = fp.pointer.allocate!M(1);
+	alias monitorType = Monitor!(T, Lock);
+	auto m = fp.pointer.allocate!monitorType(1);
 	if(m is null) return null;
 	// Copy `.init`'s bytes rather than assign it, which would run `T`'s destructor on the uninitialized block.
-	auto blank = __traits(initSymbol, M);
-	if(blank.ptr is null) core.stdc.string.memset(m, 0, M.sizeof);
-	else core.stdc.string.memcpy(m, blank.ptr, M.sizeof);
+	auto blank = __traits(initSymbol, monitorType);
+	if(blank.ptr is null) core.stdc.string.memset(m, 0, monitorType.sizeof);
+	else core.stdc.string.memcpy(m, blank.ptr, monitorType.sizeof);
 
 	static if(hasCreate!Lock) m.lock = lockScope!Lock.create();
 	static if(is(Lock == P*, P)) if(m.lock is null) {
@@ -263,7 +263,7 @@ WriteGuard!(T, Lock) tryWrite(T, Lock)(return ref Monitor!(T, Lock) m) @trusted 
 version(unittest) {
 	// A lock with only the required functions, declared in a struct to show any scope serves, not only a module.
 	private struct toyLock {
-	@nogc nothrow:
+		@nogc nothrow:
 		static struct Lock { int readers = 0; bool writer = false; }
 
 		static void lockForReading(ref Lock l) { assert(!l.writer); ++l.readers; }
@@ -365,18 +365,18 @@ unittest {
 
 		static void race(Lock)(ref Monitor!(Pair, Lock) m) {
 			write(m).value = Pair.init;
-			typeof(bc.thread.create(&bump!Lock, &m).get())[threads] ts;
-			foreach(ref t; ts) {
+			typeof(bc.thread.create(&bump!Lock, &m).get())[threads] handles;
+			foreach(ref handle; handles) {
 				auto made = bc.thread.create(&bump!Lock, &m);
 				assert(!made.isNull);
-				t = made.get;
+				handle = made.get;
 			}
 			// A writer bumps `a` and `b` in one hold, so a reader never sees them apart.
 			foreach(i; 0 .. rounds) {
 				auto r = read(m);
 				assert(r.value.a == r.value.b);
 			}
-			foreach(ref t; ts) bc.thread.join(t);
+			foreach(ref handle; handles) bc.thread.join(handle);
 			assert(read(m).value.a == threads * rounds);
 		}
 

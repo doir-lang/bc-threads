@@ -10,21 +10,19 @@ mixin(bc.platform.backendSelection);
 
 // `Posix`, not `PthreadBackend`: imports resolve before the mixin above declares it.
 version(Posix) {
-	import core.sys.posix.pthread : pthread_rwlock_t, pthread_rwlock_init, pthread_rwlock_destroy,
-		pthread_rwlock_rdlock, pthread_rwlock_tryrdlock, pthread_rwlock_wrlock, pthread_rwlock_trywrlock,
-		pthread_rwlock_unlock;
+	static import core.sys.posix.pthread;
 } else version(Windows) {
-	import core.sys.windows.windows : BOOLEAN;
+	static import core.sys.windows.windows;
 
 	// druntime does not bind the slim reader/writer lock API, so declare it from synchapi.h.
 	private struct SRWLOCK { void* ptr = null; }
 	extern(Windows) private {
 		void InitializeSRWLock(SRWLOCK*);
 		void AcquireSRWLockShared(SRWLOCK*);
-		BOOLEAN TryAcquireSRWLockShared(SRWLOCK*);
+		core.sys.windows.windows.BOOLEAN TryAcquireSRWLockShared(SRWLOCK*);
 		void ReleaseSRWLockShared(SRWLOCK*);
 		void AcquireSRWLockExclusive(SRWLOCK*);
-		BOOLEAN TryAcquireSRWLockExclusive(SRWLOCK*);
+		core.sys.windows.windows.BOOLEAN TryAcquireSRWLockExclusive(SRWLOCK*);
 		void ReleaseSRWLockExclusive(SRWLOCK*);
 	}
 }
@@ -33,7 +31,7 @@ version(Posix) {
 static if(bc.platform.threadingSupported) {
 
 	/// A reader-writer lock, used only through the pointer `create` returns: macOS binds a rwlock to its address, so a moved one blocks forever.
-	version(PthreadBackend) struct Mutex { pthread_rwlock_t handle; }
+	version(PthreadBackend) struct Mutex { core.sys.posix.pthread.pthread_rwlock_t handle; }
 	else version(Windows) struct Mutex { SRWLOCK handle; }
 
 
@@ -54,7 +52,7 @@ static if(bc.platform.threadingSupported) {
 		version(PthreadBackend) {
 			bool failed = false;
 			debug failed = bc.platform.simulatedFailure();
-			if(failed || pthread_rwlock_init(&m.handle, null) != 0) {
+			if(failed || core.sys.posix.pthread.pthread_rwlock_init(&m.handle, null) != 0) {
 				fp.pointer.free(m);
 				return null;
 			}
@@ -71,7 +69,7 @@ static if(bc.platform.threadingSupported) {
 	/// ---
 	void free(Mutex* m) @trusted {
 		if(m is null) return;
-		version(PthreadBackend) cast(void) pthread_rwlock_destroy(&m.handle);
+		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_destroy(&m.handle);
 		fp.pointer.free(m);
 	}
 
@@ -86,7 +84,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	bool tryLockForReading(Mutex* m) @trusted {
-		version(PthreadBackend) return pthread_rwlock_tryrdlock(&m.handle) == 0;
+		version(PthreadBackend) return core.sys.posix.pthread.pthread_rwlock_tryrdlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockShared(&m.handle) != 0;
 	}
 
@@ -100,7 +98,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	void lockForReading(Mutex* m) @trusted {
-		version(PthreadBackend) cast(void) pthread_rwlock_rdlock(&m.handle);
+		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_rdlock(&m.handle);
 		else version(Windows) AcquireSRWLockShared(&m.handle);
 	}
 
@@ -116,7 +114,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	void unlockForReading(Mutex* m) @trusted {
-		version(PthreadBackend) cast(void) pthread_rwlock_unlock(&m.handle);
+		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockShared(&m.handle);
 	}
 
@@ -132,7 +130,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	bool tryLockForWriting(Mutex* m) @trusted {
-		version(PthreadBackend) return pthread_rwlock_trywrlock(&m.handle) == 0;
+		version(PthreadBackend) return core.sys.posix.pthread.pthread_rwlock_trywrlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockExclusive(&m.handle) != 0;
 	}
 
@@ -146,7 +144,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	void lockForWriting(Mutex* m) @trusted {
-		version(PthreadBackend) cast(void) pthread_rwlock_wrlock(&m.handle);
+		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_wrlock(&m.handle);
 		else version(Windows) AcquireSRWLockExclusive(&m.handle);
 	}
 
@@ -162,7 +160,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	void unlockForWriting(Mutex* m) @trusted {
-		version(PthreadBackend) cast(void) pthread_rwlock_unlock(&m.handle);
+		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_unlock(&m.handle);
 		else version(Windows) ReleaseSRWLockExclusive(&m.handle);
 	}
 

@@ -1,7 +1,7 @@
 /// A reader-writer spinlock whose `.init` is unlocked, so it needs no `create` and works from a `__gshared` on first use.
 module bc.spinlock;
 
-import core.atomic : atomicLoad, atomicOp, atomicStore, cas, pause, MemoryOrder;
+static import core.atomic;
 
 @nogc nothrow:
 
@@ -10,8 +10,6 @@ struct SpinLock {
 	// 0 when free, the number of readers while read-held, -1 while write-held.
 	private shared int state = 0;
 }
-
-
 
 
 /// Whether readers or a writer hold `self`.
@@ -25,7 +23,7 @@ struct SpinLock {
 /// unlockForReading(l);
 /// ---
 bool isLocked(ref SpinLock self) @trusted {
-	return atomicLoad(self.state) != 0;
+	return core.atomic.atomicLoad(self.state) != 0;
 }
 
 /// Whether a writer holds `self`.
@@ -38,7 +36,7 @@ bool isLocked(ref SpinLock self) @trusted {
 /// unlockForWriting(l);
 /// ---
 bool isLockedForWriting(ref SpinLock self) @trusted {
-	return atomicLoad(self.state) < 0;
+	return core.atomic.atomicLoad(self.state) < 0;
 }
 
 /// Whether readers hold `self`.
@@ -51,7 +49,7 @@ bool isLockedForWriting(ref SpinLock self) @trusted {
 /// unlockForReading(l);
 /// ---
 bool isLockedForReading(ref SpinLock self) @trusted {
-	return atomicLoad(self.state) > 0;
+	return core.atomic.atomicLoad(self.state) > 0;
 }
 
 /// Takes a shared hold on `self` without waiting; returns false, taking nothing, if a writer holds it.
@@ -65,10 +63,10 @@ bool isLockedForReading(ref SpinLock self) @trusted {
 /// unlockForReading(l);
 /// ---
 bool tryLockForReading(ref SpinLock self) @trusted {
-	int cur = atomicLoad!(MemoryOrder.raw)(self.state);
-	// A failed `cas` stores the value it found in `cur`, so the loop retries against that.
-	while(cur >= 0)
-		if(cas(&self.state, &cur, cur + 1)) return true;
+	int current = core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state);
+	// A failed `cas` stores the value it found in `current`, so the loop retries against that.
+	while(current >= 0)
+		if(core.atomic.cas(&self.state, &current, current + 1)) return true;
 	return false;
 }
 
@@ -84,7 +82,7 @@ bool tryLockForReading(ref SpinLock self) @trusted {
 void lockForReading(ref SpinLock self) @trusted {
 	// Spin on plain loads so waiters share the cache line, rather than each `cas` stealing it from the holder.
 	while(!tryLockForReading(self))
-		while(atomicLoad!(MemoryOrder.raw)(self.state) < 0) pause();
+		while(core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state) < 0) core.atomic.pause();
 }
 
 /// Releases a shared hold on `self`, which must be read-held.
@@ -97,8 +95,8 @@ void lockForReading(ref SpinLock self) @trusted {
 /// assert(!isLocked(l));
 /// ---
 void unlockForReading(ref SpinLock self) @trusted {
-	assert(atomicLoad!(MemoryOrder.raw)(self.state) > 0, "bc.spinlock: unlockForReading of a lock that is not read-held");
-	atomicOp!"-="(self.state, 1);
+	assert(core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state) > 0, "bc.spinlock: unlockForReading of a lock that is not read-held");
+	core.atomic.atomicOp!"-="(self.state, 1);
 }
 
 
@@ -112,7 +110,7 @@ void unlockForReading(ref SpinLock self) @trusted {
 /// unlockForWriting(l);
 /// ---
 bool tryLockForWriting(ref SpinLock self) @trusted {
-	return cas(&self.state, 0, -1);
+	return core.atomic.cas(&self.state, 0, -1);
 }
 
 /// Spins until nobody holds `self`, then takes the exclusive hold on it. Not reentrant: a thread already holding `self` spins forever.
@@ -126,7 +124,7 @@ bool tryLockForWriting(ref SpinLock self) @trusted {
 /// ---
 void lockForWriting(ref SpinLock self) @trusted {
 	while(!tryLockForWriting(self))
-		while(atomicLoad!(MemoryOrder.raw)(self.state) != 0) pause();
+		while(core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state) != 0) core.atomic.pause();
 }
 
 /// Releases the exclusive hold on `self`, which must be write-held.
@@ -139,8 +137,8 @@ void lockForWriting(ref SpinLock self) @trusted {
 /// assert(!isLocked(l));
 /// ---
 void unlockForWriting(ref SpinLock self) @trusted {
-	assert(atomicLoad!(MemoryOrder.raw)(self.state) == -1, "bc.spinlock: unlockForWriting of a lock that is not write-held");
-	atomicStore!(MemoryOrder.rel)(self.state, 0);
+	assert(core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state) == -1, "bc.spinlock: unlockForWriting of a lock that is not write-held");
+	core.atomic.atomicStore!(core.atomic.MemoryOrder.rel)(self.state, 0);
 }
 
 

@@ -8,12 +8,12 @@ static import bc.thread;
 static import fp.dynarray;
 static import fp.pointer;
 public import bc.platform : threadingSupported;
-import core.atomic : atomicOp, atomicLoad, atomicStore, pause;
+static import core.atomic;
 
 @nogc nothrow:
 
 mixin(bc.platform.backendSelection);
-version(Windows) import core.sys.windows.windows : DWORD;
+version(Windows) static import core.sys.windows.windows;
 
 
 /// The function a `Job` runs, called with the job's `arg` on a worker thread.
@@ -69,7 +69,7 @@ static if(threadingSupported) {
 	/// free(pool);
 	/// ---
 	size_t pendingJobs(const ThreadPool* pool) @trusted {
-		return cast(size_t) atomicLoad(pool.outstanding);
+		return cast(size_t) core.atomic.atomicLoad(pool.outstanding);
 	}
 
 
@@ -85,10 +85,10 @@ static if(threadingSupported) {
 		while(true) {
 			// Every post to `wake` either stops the pool or follows one pushed job, so the stack is not empty here.
 			bc.semaphore.wait(pool.wake);
-			if(atomicLoad(pool.stopping)) return;
+			if(core.atomic.atomicLoad(pool.stopping)) return;
 			Job job = claimJob(pool);
 			job.work(job.arg);
-			if(atomicOp!"-="(pool.outstanding, cast(ptrdiff_t) 1) == 0) {
+			if(core.atomic.atomicOp!"-="(pool.outstanding, cast(ptrdiff_t) 1) == 0) {
 				bc.mutex.lockForWriting(pool.stackLock);
 				immutable woken = pool.waiters;
 				pool.waiters = 0;
@@ -104,7 +104,7 @@ static if(threadingSupported) {
 			return null;
 		}
 	} else version(Windows) {
-		extern(Windows) private DWORD workerMain(void* arg) {
+		extern(Windows) private core.sys.windows.windows.DWORD workerMain(void* arg) {
 			workerLoop(cast(ThreadPool*) arg);
 			return 0;
 		}
@@ -123,16 +123,16 @@ static if(threadingSupported) {
 		// `create` can leave `stackLock` null on a partial failure, and nobody can be waiting without it.
 		if(pool.stackLock !is null) {
 			bc.mutex.lockForWriting(pool.stackLock);
-			atomicStore(pool.stopping, true);
+			core.atomic.atomicStore(pool.stopping, true);
 			immutable woken = pool.waiters;
 			pool.waiters = 0;
 			bc.mutex.unlockForWriting(pool.stackLock);
 			foreach(_; 0 .. woken) bc.semaphore.post(pool.done);
-		} else atomicStore(pool.stopping, true);
+		} else core.atomic.atomicStore(pool.stopping, true);
 		foreach(i; 0 .. pool.count) bc.semaphore.post(pool.wake);
 		foreach(i; 0 .. pool.count) bc.thread.join(pool.handles[i]);
 		// A woken waiter still reads the pool, so it must leave before any part of it is destroyed.
-		while(atomicLoad(pool.users) > 0) pause();
+		while(core.atomic.atomicLoad(pool.users) > 0) core.atomic.pause();
 		bc.semaphore.free(pool.wake);
 		bc.semaphore.free(pool.done);
 		bc.mutex.free(pool.stackLock);
@@ -205,7 +205,7 @@ static if(threadingSupported) {
 			// Workers pop from the top, so push in reverse to have `jobs[0]` claimed first.
 			foreach(i, ref job; jobs) pool.stack[base + jobs.length - 1 - i] = job;
 			// Count the jobs before unlocking: a worker woken for an earlier job could claim one, finish it, and let `wait` return too early.
-			atomicOp!"+="(pool.outstanding, cast(ptrdiff_t) jobs.length);
+			core.atomic.atomicOp!"+="(pool.outstanding, cast(ptrdiff_t) jobs.length);
 		}
 		bc.mutex.unlockForWriting(pool.stackLock);
 		if(!pushed) return false;
@@ -224,11 +224,11 @@ static if(threadingSupported) {
 	/// free(pool);
 	/// ---
 	void wait(ThreadPool* pool) @trusted {
-		atomicOp!"+="(pool.users, 1);
+		core.atomic.atomicOp!"+="(pool.users, 1);
 		while(true) {
 			// The last job decrements `outstanding` before taking the lock, so one checked under it cannot miss that job's posts.
 			bc.mutex.lockForWriting(pool.stackLock);
-			if(atomicLoad(pool.outstanding) <= 0 || atomicLoad(pool.stopping)) {
+			if(core.atomic.atomicLoad(pool.outstanding) <= 0 || core.atomic.atomicLoad(pool.stopping)) {
 				bc.mutex.unlockForWriting(pool.stackLock);
 				break;
 			}
@@ -236,7 +236,7 @@ static if(threadingSupported) {
 			bc.mutex.unlockForWriting(pool.stackLock);
 			bc.semaphore.wait(pool.done);
 		}
-		atomicOp!"-="(pool.users, 1);
+		core.atomic.atomicOp!"-="(pool.users, 1);
 	}
 
 	/// Spins, rather than sleeping like `wait`, until at most `count` jobs submitted to `pool` have not finished, or until `pool` is being freed, whose queued jobs then never run.
@@ -248,9 +248,9 @@ static if(threadingSupported) {
 	/// free(pool);
 	/// ---
 	void waitUntilPending(ThreadPool* pool, size_t count) @trusted {
-		atomicOp!"+="(pool.users, 1);
-		while(atomicLoad(pool.outstanding) > cast(ptrdiff_t) count && !atomicLoad(pool.stopping)) pause();
-		atomicOp!"-="(pool.users, 1);
+		core.atomic.atomicOp!"+="(pool.users, 1);
+		while(core.atomic.atomicLoad(pool.outstanding) > cast(ptrdiff_t) count && !core.atomic.atomicLoad(pool.stopping)) core.atomic.pause();
+		core.atomic.atomicOp!"-="(pool.users, 1);
 	}
 
 	/// Submits `jobs`, then sleeps until they and every other job submitted to `pool` have finished. Like `wait`, a job must never call it on its own pool.
@@ -315,7 +315,7 @@ static if(threadingSupported) {
 
 
 unittest {
-	static void bump(void* arg) @nogc nothrow { atomicOp!"+="(*cast(shared int*) arg, 1); }
+	static void bump(void* arg) @nogc nothrow { core.atomic.atomicOp!"+="(*cast(shared int*) arg, 1); }
 	// Fails each acquisition in turn: pool, each semaphore and its OS object, the lock and any rwlock, the handles, then each worker.
 	static if(!threadingSupported) enum acquisitions = 1;
 	else version(PthreadBackend) enum acquisitions = 10;
@@ -340,17 +340,17 @@ unittest {
 		assert(pendingJobs(pool) == 0);
 	}
 	assert(run(pool, jobs[]));
-	assert(atomicLoad(runs) == 3);
+	assert(core.atomic.atomicLoad(runs) == 3);
 	assert(submit(pool, jobs[]));
 	waitUntilPending(pool, 0);
-	assert(atomicLoad(runs) == 6);
+	assert(core.atomic.atomicLoad(runs) == 6);
 	// Nobody was in `wait` as the last job finished, so no post may be left to make a later `wait` spin.
 	static if(threadingSupported) version(linux) assert(bc.semaphore.value(pool.done) == 0);
 
 	// With one worker, jobs from one submit run one at a time in the order given.
 	static __gshared size_t[3] order;
 	static shared size_t finished = 0;
-	static void record(void* arg) @nogc nothrow { order[atomicOp!"+="(finished, 1) - 1] = cast(size_t) arg; }
+	static void record(void* arg) @nogc nothrow { order[core.atomic.atomicOp!"+="(finished, 1) - 1] = cast(size_t) arg; }
 	auto serial = create(1);
 	assert(serial !is null);
 	scope(exit) free(serial);
@@ -359,8 +359,8 @@ unittest {
 	assert(order == [0, 1, 2]);
 
 	static if(threadingSupported) {
-		static void gate(void* arg) @nogc nothrow { while(!atomicLoad(*cast(shared bool*) arg)) {} }
-		static void waitOn(ThreadPool* p) @nogc nothrow { wait(p); }
+		static void gate(void* arg) @nogc nothrow { while(!core.atomic.atomicLoad(*cast(shared bool*) arg)) {} }
+		static void waitOn(ThreadPool* pool) @nogc nothrow { wait(pool); }
 
 		// Two threads wait on one job, so the one its `done` wakes must wake the other. One that starts late still passes.
 		shared bool open = false;
@@ -370,13 +370,13 @@ unittest {
 		auto second = bc.thread.create(&waitOn, pool);
 		assert(!first.isNull && !second.isNull);
 		bc.platform.nap(10);
-		atomicStore(open, true);
+		core.atomic.atomicStore(open, true);
 		bc.thread.join(first.get);
 		bc.thread.join(second.get);
 
 		// `free` wakes a thread blocked in `wait` and waits for it to return before destroying the semaphore it was blocked on.
 		static shared bool returned;
-		static void waitAndMark(ThreadPool* p) @nogc nothrow { wait(p); atomicStore(returned, true); }
+		static void waitAndMark(ThreadPool* p) @nogc nothrow { wait(p); core.atomic.atomicStore(returned, true); }
 		static void slow(void*) @nogc nothrow { bc.platform.nap(1); }
 		auto closing = create(1);
 		assert(closing !is null);
@@ -388,6 +388,6 @@ unittest {
 		bc.platform.nap(10);
 		free(closing);
 		bc.thread.join(blocked.get);
-		assert(atomicLoad(returned));
+		assert(core.atomic.atomicLoad(returned));
 	}
 }

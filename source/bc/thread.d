@@ -4,25 +4,25 @@ module bc.thread;
 static import bc.platform;
 static import core.stdc.stdlib;
 public import bc.platform : threadingSupported;
-import std.meta : staticMap;
-import std.traits : Unqual;
-import std.typecons : Nullable;
+static import std.meta;
+static import std.traits;
+static import std.typecons;
 
 @nogc nothrow:
 
 mixin(bc.platform.backendSelection);
 
 // `Posix`, not `PthreadBackend`: imports resolve before the mixin above declares it.
-version(Posix) import core.sys.posix.pthread : pthread_t, pthread_create, pthread_detach, pthread_join;
+version(Posix) static import core.sys.posix.pthread;
 version(Posix) static import core.sys.posix.time;
 
 version(linux) {
-	import core.sys.linux.sched : cpu_set_t, CPU_COUNT, sched_getaffinity;
-	import core.sys.posix.unistd : sysconf, _SC_NPROCESSORS_ONLN;
+	static import core.sys.linux.sched;
+	static import core.sys.posix.unistd;
 } else version(OSX) {
-	import core.sys.darwin.sys.sysctl : sysctlbyname;
+	static import core.sys.darwin.sys.sysctl;
 } else version(Windows) {
-	import core.sys.windows.windows : HANDLE, DWORD, CreateThread, WaitForSingleObject, CloseHandle, INFINITE, GetSystemInfo, SYSTEM_INFO;
+	static import core.sys.windows.windows;
 }
 
 
@@ -35,26 +35,25 @@ version(linux) {
 size_t processorCount() @trusted {
 	version(linux) {
 		// `cpu_set_t` holds 1024 CPUs, so a larger machine fails here and falls back to counting every online one.
-		cpu_set_t set;
-		if(sched_getaffinity(0, set.sizeof, &set) == 0) {
-			immutable allowed = CPU_COUNT(&set);
+		core.sys.linux.sched.cpu_set_t set;
+		if(core.sys.linux.sched.sched_getaffinity(0, set.sizeof, &set) == 0) {
+			immutable allowed = core.sys.linux.sched.CPU_COUNT(&set);
 			if(allowed > 0) return cast(size_t) allowed;
 		}
-		immutable n = sysconf(_SC_NPROCESSORS_ONLN);
+		immutable n = core.sys.posix.unistd.sysconf(core.sys.posix.unistd._SC_NPROCESSORS_ONLN);
 		return n > 0 ? cast(size_t) n : 1;
 	} else version(OSX) {
 		uint n;
 		size_t size = n.sizeof;
-		if(sysctlbyname("hw.logicalcpu", &n, &size, null, 0) != 0) return 1;
+		if(core.sys.darwin.sys.sysctl.sysctlbyname("hw.logicalcpu", &n, &size, null, 0) != 0) return 1;
 		return n > 0 ? cast(size_t) n : 1;
 	} else version(Windows) {
-		SYSTEM_INFO info;
-		GetSystemInfo(&info);
+		core.sys.windows.windows.SYSTEM_INFO info;
+		core.sys.windows.windows.GetSystemInfo(&info);
 		return info.dwNumberOfProcessors > 0 ? cast(size_t) info.dwNumberOfProcessors : 1;
 	} else
 		return 1;
 }
-
 
 
 // --- scheduling and time -------------------------------------------------------
@@ -139,21 +138,32 @@ ulong monotonicMicroseconds() @trusted {
 	}
 }
 
+/// Whole milliseconds since the same origin as `monotonicMicroseconds`, for deadlines and timeouts counted in milliseconds.
+///
+/// Examples:
+/// ---
+/// immutable deadline = monotonicMilliseconds() + 50;
+/// assert(monotonicMilliseconds() <= deadline);
+/// ---
+ulong monotonicMilliseconds() {
+	return monotonicMicroseconds() / 1000;
+}
+
 static if(threadingSupported) {
 
 	/// The entry point `create` runs on a new thread: `extern(C)` returning `void*` with pthreads, `extern(Windows)` returning `DWORD` on Windows.
 	version(PthreadBackend) alias ThreadFunction = extern(C) void* function(void*) @nogc nothrow;
-	else version(Windows) alias ThreadFunction = extern(Windows) DWORD function(void*) @nogc nothrow;
+	else version(Windows) alias ThreadFunction = extern(Windows) core.sys.windows.windows.DWORD function(void*) @nogc nothrow;
 
 	/// A started thread, to be joined exactly once with `join`.
-	version(PthreadBackend) struct Thread { pthread_t handle; }
-	else version(Windows) struct Thread { HANDLE handle; }
+	version(PthreadBackend) struct Thread { core.sys.posix.pthread.pthread_t handle; }
+	else version(Windows) struct Thread { core.sys.windows.windows.HANDLE handle; }
 
 	// The C heap, not `fp.pointer`: its `allocator` is per thread, so the new thread could not free with the creator's.
 	private struct Closure(F, Args...) {
 		F entry;
 		// Unqualified, since a `const` or `immutable` argument would make the closure impossible to assign into its heap copy.
-		staticMap!(Unqual, Args) args;
+		std.meta.staticMap!(std.traits.Unqual, Args) args;
 	}
 
 
@@ -172,16 +182,16 @@ static if(threadingSupported) {
 	/// join(t.get);
 	/// assert(ran == 1);
 	/// ---
-	Nullable!Thread create(ThreadFunction entry, void* arg) @trusted {
-		debug if(bc.platform.simulatedFailure()) return Nullable!Thread.init;
+	std.typecons.Nullable!Thread create(ThreadFunction entry, void* arg) @trusted {
+		debug if(bc.platform.simulatedFailure()) return std.typecons.Nullable!Thread.init;
 		Thread t;
 		version(PthreadBackend) {
-			if(pthread_create(&t.handle, null, entry, arg) != 0) return Nullable!Thread.init;
+			if(core.sys.posix.pthread.pthread_create(&t.handle, null, entry, arg) != 0) return std.typecons.Nullable!Thread.init;
 		} else version(Windows) {
-			t.handle = CreateThread(null, 0, entry, arg, 0, null);
-			if(t.handle is null) return Nullable!Thread.init;
+			t.handle = core.sys.windows.windows.CreateThread(null, 0, entry, arg, 0, null);
+			if(t.handle is null) return std.typecons.Nullable!Thread.init;
 		}
-		return Nullable!Thread(t);
+		return std.typecons.Nullable!Thread(t);
 	}
 
 	version(PthreadBackend) {
@@ -192,7 +202,7 @@ static if(threadingSupported) {
 			return null;
 		}
 	} else version(Windows) {
-		private extern(Windows) DWORD closureTrampoline(F, Args...)(void* arg) {
+		private extern(Windows) core.sys.windows.windows.DWORD closureTrampoline(F, Args...)(void* arg) {
 			auto closure = cast(Closure!(F, Args)*) arg;
 			closure.entry(closure.args);
 			core.stdc.stdlib.free(closure);
@@ -214,13 +224,13 @@ static if(threadingSupported) {
 	/// join(t.get);
 	/// assert(sum == 7);
 	/// ---
-	Nullable!Thread create(F, Args...)(F entry, Args args) @trusted
+	std.typecons.Nullable!Thread create(F, Args...)(F entry, Args args) @trusted
 	if(is(typeof(entry(args))) && !is(F == ThreadFunction)) {
-		alias C = Closure!(F, Args);
-		debug if(bc.platform.simulatedFailure()) return Nullable!Thread.init;
-		auto closure = cast(C*) core.stdc.stdlib.malloc(C.sizeof);
-		if(closure is null) return Nullable!Thread.init;
-		*closure = C(entry, args);
+		alias closureType = Closure!(F, Args);
+		debug if(bc.platform.simulatedFailure()) return std.typecons.Nullable!Thread.init;
+		auto closure = cast(closureType*) core.stdc.stdlib.malloc(closureType.sizeof);
+		if(closure is null) return std.typecons.Nullable!Thread.init;
+		*closure = closureType(entry, args);
 		auto t = create(&closureTrampoline!(F, Args), closure);
 		if(t.isNull) core.stdc.stdlib.free(closure);
 		return t;
@@ -237,14 +247,14 @@ static if(threadingSupported) {
 	/// join(t.get);
 	/// ---
 	void join(ref Thread t) @trusted {
-		version(PthreadBackend) cast(void) pthread_join(t.handle, null);
+		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_join(t.handle, null);
 		else version(Windows) {
-			cast(void) WaitForSingleObject(t.handle, INFINITE);
-			cast(void) CloseHandle(t.handle);
+			cast(void) core.sys.windows.windows.WaitForSingleObject(t.handle, core.sys.windows.windows.INFINITE);
+			cast(void) core.sys.windows.windows.CloseHandle(t.handle);
 		}
 	}
 
-	/// Lets `t` run on unjoined, releasing it when it finishes, for a thread nothing will wait for. Call this or `join` on a thread, once, not both.
+	/// Lets `t` run unjoined, releasing it when it finishes, for a thread nothing will wait for. Call this or `join` on a thread, once, not both.
 	///
 	/// Examples:
 	/// ---
@@ -254,8 +264,8 @@ static if(threadingSupported) {
 	/// detach(t.get);
 	/// ---
 	void detach(ref Thread t) @trusted {
-		version(PthreadBackend) cast(void) pthread_detach(t.handle);
-		else version(Windows) cast(void) CloseHandle(t.handle);
+		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_detach(t.handle);
+		else version(Windows) cast(void) core.sys.windows.windows.CloseHandle(t.handle);
 	}
 
 }
@@ -264,19 +274,25 @@ static if(threadingSupported) {
 unittest {
 	assert(processorCount() >= 1);
 	version(linux) {
-		import core.sys.linux.sched : CPU_ISSET, CPU_SET, sched_setaffinity;
+		static import core.sys.linux.sched;
 
 		// Pinned to one CPU it may run on, this thread must count only that one.
-		cpu_set_t original, pinned;
-		assert(sched_getaffinity(0, original.sizeof, &original) == 0);
+		core.sys.linux.sched.cpu_set_t original, pinned;
+		assert(core.sys.linux.sched.sched_getaffinity(0, original.sizeof, &original) == 0);
 		size_t cpu = 0;
-		while(!CPU_ISSET(cpu, &original)) cpu++;
-		cast(void) CPU_SET(cpu, &pinned);
-		assert(sched_setaffinity(0, pinned.sizeof, &pinned) == 0);
+		while(!core.sys.linux.sched.CPU_ISSET(cpu, &original)) cpu++;
+		cast(void) core.sys.linux.sched.CPU_SET(cpu, &pinned);
+		assert(core.sys.linux.sched.sched_setaffinity(0, pinned.sizeof, &pinned) == 0);
 		immutable pinnedCount = processorCount();
-		assert(sched_setaffinity(0, original.sizeof, &original) == 0);
+		assert(core.sys.linux.sched.sched_setaffinity(0, original.sizeof, &original) == 0);
 		assert(pinnedCount == 1);
 	}
+
+	// The millisecond clock is the microsecond one truncated, and never runs backwards.
+	immutable microseconds = monotonicMicroseconds();
+	immutable milliseconds = monotonicMilliseconds();
+	assert(milliseconds == microseconds / 1000 || milliseconds == microseconds / 1000 + 1);
+	assert(monotonicMilliseconds() >= milliseconds);
 
 	static if(threadingSupported) {
 		static void add(int* sum, int a, int b) @nogc nothrow { *sum = a + b; }
@@ -295,16 +311,16 @@ unittest {
 		}
 		assert(sum == 7);
 
-		// A thread that allocates through its own `fp.pointer.allocator` must find everything it allocated freed through it too, and the creator's must be untouched.
+		// A thread's own `fp.pointer.allocator` must free everything it allocated; the creator's stays untouched.
 		static import fp.pointer;
-		import core.atomic : atomicLoad, atomicOp, atomicStore;
+		static import core.atomic;
 		static __gshared fp.pointer.Allocator underlying;
 		static shared ptrdiff_t live = 0;
 		static shared ptrdiff_t calls = 0;
 		static void* counting(void* p, size_t size) @nogc nothrow {
-			atomicOp!"+="(calls, 1);
-			if(size == 0) atomicOp!"-="(live, 1);
-			else if(p is null) atomicOp!"+="(live, 1);
+			core.atomic.atomicOp!"+="(calls, 1);
+			if(size == 0) core.atomic.atomicOp!"-="(live, 1);
+			else if(p is null) core.atomic.atomicOp!"+="(live, 1);
 			return underlying(p, size);
 		}
 		static void allocateAndFree(void*) @nogc nothrow {
@@ -316,16 +332,16 @@ unittest {
 		t = create(&allocateAndFree, null);
 		assert(!t.isNull);
 		join(t.get);
-		assert(calls == 2 && atomicLoad(live) == 0);
+		assert(calls == 2 && core.atomic.atomicLoad(live) == 0);
 		assert(fp.pointer.allocator is underlying);
 
 		// A detached thread runs to the end without anyone joining it.
 		static shared bool finished = false;
-		static void finish() @nogc nothrow { atomicStore(finished, true); }
+		static void finish() @nogc nothrow { core.atomic.atomicStore(finished, true); }
 		t = create(&finish);
 		assert(!t.isNull);
 		detach(t.get);
-		while(!atomicLoad(finished)) bc.platform.nap(1);
+		while(!core.atomic.atomicLoad(finished)) bc.platform.nap(1);
 	}
 }
 
@@ -333,8 +349,8 @@ unittest {
 version(WASI) {} else
 version(Posix)
 unittest { // a repeating 2ms timer interrupts a 30ms sleep about fifteen times, and sleep must sleep the remainder each time
-	import core.sys.posix.signal : sigaction_t, sigaction, sigemptyset, SIGALRM;
-	import core.sys.posix.sys.time : itimerval, setitimer;
+	static import core.sys.posix.signal;
+	static import core.sys.posix.sys.time;
 
 	// druntime does not define `ITIMER_REAL` on macOS; `<sys/time.h>` has it as 0, like every other platform.
 	version(OSX) enum ITIMER_REAL = 0;
@@ -343,24 +359,24 @@ unittest { // a repeating 2ms timer interrupts a 30ms sleep about fifteen times,
 	static extern(C) void onAlarm(int) @nogc nothrow {}
 
 	// The handler only has to exist for the signal not to kill the process.
-	sigaction_t action, previous;
-	assert(sigemptyset(&action.sa_mask) == 0);
+	core.sys.posix.signal.sigaction_t action, previous;
+	assert(core.sys.posix.signal.sigemptyset(&action.sa_mask) == 0);
 	action.sa_handler = &onAlarm;
-	assert(sigaction(SIGALRM, &action, &previous) == 0);
+	assert(core.sys.posix.signal.sigaction(core.sys.posix.signal.SIGALRM, &action, &previous) == 0);
 
-	itimerval timer;
+	core.sys.posix.sys.time.itimerval timer;
 	timer.it_value.tv_usec = 2_000;
 	timer.it_interval.tv_usec = 2_000;
-	assert(setitimer(ITIMER_REAL, &timer, null) == 0);
+	assert(core.sys.posix.sys.time.setitimer(ITIMER_REAL, &timer, null) == 0);
 
 	immutable start = monotonicMicroseconds();
 	immutable finished = sleep(30_000);
 	immutable elapsed = monotonicMicroseconds() - start;
 
 	// Stop the timer and put the old handler back before asserting anything.
-	itimerval off;
-	immutable stopped = setitimer(ITIMER_REAL, &off, null) == 0;
-	immutable restored = sigaction(SIGALRM, &previous, null) == 0;
+	core.sys.posix.sys.time.itimerval off;
+	immutable stopped = core.sys.posix.sys.time.setitimer(ITIMER_REAL, &off, null) == 0;
+	immutable restored = core.sys.posix.signal.sigaction(core.sys.posix.signal.SIGALRM, &previous, null) == 0;
 	assert(stopped && restored);
 
 	assert(finished);

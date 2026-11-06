@@ -48,7 +48,6 @@ private ref bc.spinlock.SpinLock shardOf(return ref ReaderLock self) {
 }
 
 
-
 // wrapper: takes the calling thread's shard
 /// Spins until no writer holds `self`, then takes a shared hold on the calling thread's shard.
 ///
@@ -163,18 +162,18 @@ unittest {
 			}
 		}
 		bc.monitor.Monitor!(Pair, ReaderLock) m;
-		typeof(bc.thread.create(&bump, &m).get())[threads] ts;
-		foreach(ref t; ts) {
+		typeof(bc.thread.create(&bump, &m).get())[threads] handles;
+		foreach(ref handle; handles) {
 			auto made = bc.thread.create(&bump, &m);
 			assert(!made.isNull);
-			t = made.get;
+			handle = made.get;
 		}
 		// Each writer moves both halves in one hold, so a reader on any shard never sees them apart.
 		foreach(i; 0 .. rounds) {
 			auto r = bc.monitor.read(m);
 			assert(r.value.a == r.value.b);
 		}
-		foreach(ref t; ts) bc.thread.join(t);
+		foreach(ref handle; handles) bc.thread.join(handle);
 		assert(bc.monitor.read(m).value.a == threads * rounds);
 	}
 }

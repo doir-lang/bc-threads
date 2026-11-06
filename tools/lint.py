@@ -33,6 +33,7 @@ CONFIG = {
 	'check_ecrs_writes': False,
 	'exempt': {
 		'hand-written-shared-cast': ['source/bc/platform.d'],
+		'millisecond-clock': ['source/bc/thread.d'],
 		'posix-yield': ['source/bc/thread.d'],
 		'raw-memcmp': [],
 		'raw-byte-hash': [],
@@ -54,13 +55,20 @@ CRYPTIC = {
 # (id, pattern, message, hint)
 PUSHED = [
 	('hand-written-shared-cast', r'\*\s*cast\s*\(\s*shared\s*\(', 'field viewed as shared through a hand-written cast', 'use bc.platform.asShared'),
-	('posix-yield', r'\bsched_yield\b|\bnanosleep\b|\bclock_gettime\b', 'direct scheduler or clock call', 'use bc.thread.yield, bc.thread.sleep or bc.thread.monotonicSeconds'),
+	('posix-yield', r'\bsched_yield\b|\bnanosleep\b|\bclock_gettime\b', 'direct scheduler or clock call', 'use bc.thread.yield, bc.thread.sleep or bc.thread.monotonicMicroseconds'),
+	('millisecond-clock', r'monotonicMicroseconds\s*\(\s*\)\s*/\s*1_?000', 'milliseconds derived from the microsecond clock', 'use bc.thread.monotonicMilliseconds'),
 	('raw-memcmp', r'\bmemcmp\s*\(\s*&', 'struct compared by its raw bytes, padding included', 'use fp.lifecycle.equal'),
 	('raw-byte-hash', r'\b(murmur|hashBytes)\s*\(\s*\(\s*cast\s*\(\s*const\s*\(\s*ubyte\s*\)\s*\*\s*\)\s*&', 'struct hashed by its raw bytes, padding included', 'use fp.lifecycle.contentHash'),
 	('make-dynamic', r'\bmakeDynamic\b', 'makeDynamic', 'use fp.string.clone'),
 	('size-max-sentinel', r'[!=]=\s*size_t\.max\b', 'raw size_t.max sentinel', 'compare against fp.pointer.notFound'),
 	('qsort', r'\bqsort\b|\bextern\s*\(\s*C\s*\)\s*int\s+compare', 'qsort with a C comparator', 'use std.algorithm.sorting.sort'),
-	('snprintf-buffer', r'\bsnprintf\s*\(', 'snprintf into a local buffer', 'use fp.string.format or fp.string.appendUnsigned'),
+	('snprintf-buffer', r'\bsnprintf\s*\(', 'snprintf into a local buffer', 'use fp.string.format or fp.string.numbers.appendUnsigned'),
+	('fp-string-ascii', r'\bfp\.string\.(isDigit|isOctalDigit|isHexDigit|isAsciiAlpha|equalIgnoringAsciiCase)\b', 'character class or case-insensitive comparison through fp.string', 'use fp.string.ascii (isDigit, isHexDigit, isLetter, equalIgnoringCase)'),
+	('fp-string-numbers', r'\bfp\.string\.(maxDecimalLength|formatUnsigned|formatSigned|appendUnsigned|appendSigned|appendHex|appendFloat|hexDigitValue|parseUnsigned|parseFloat|Unsigned|Float)\b', 'number formatting or parsing through fp.string', 'use fp.string.numbers'),
+	('fp-string-utf', r'\bfp\.string\.(Utf8Error|encodeUtf8|decodeUtf8|utf8SequenceLength|utf16Length|appendCodepoint|inCodepointRanges|codepoints|utf16|fromCodepoints|fromUtf16)\b', 'UTF-8 or UTF-16 through fp.string', 'use fp.string.utf (EncodeError, encode, decode, sequenceLength, utf16Length, append, inRanges, codepoints, toUtf16, fromCodepoints, fromUtf16)'),
+	('renamed-replace-hash', r'\bfp\.string\.replace\s*\(|\bhashBytesFast\b', 'fp.string.replace or fp.algorithms.hashBytesFast, since renamed', 'use fp.string.replaceAll or fp.algorithms.hashShortBytes'),
+	('hand-written-line-break', r'==\s+\|\|\s*\(\s*[\w.]+\[[^\]]+\]\s*==\s+&&\s*\(', 'line break (\\n, \\r\\n or lone \\r) tested by hand', 'use fp.string.breaksLine, lineOf, lineStart or lineEnd'),
+	('hand-written-trim', r'while\s*\(\s*([\w.]+)\.length\s*&&\s*\(\s*\1\[\s*(0|\$\s*-\s*1)\s*\]\s*==', 'leading or trailing characters trimmed by hand', 'use fp.string.trim, trimStart or trimEnd'),
 ]
 
 PLATFORM = re.compile(r'\bcore\s*\.\s*sys\s*\.')
