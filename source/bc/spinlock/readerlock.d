@@ -9,7 +9,7 @@
 /// bc.monitor.write(m).value = 3;
 /// assert(bc.monitor.read(m).value == 3);
 /// ---
-module bc.readerlock;
+module bc.spinlock.readerlock;
 
 static import core.atomic;
 

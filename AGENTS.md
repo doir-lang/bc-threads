@@ -83,7 +83,7 @@ Every library in the stack forwards these rules.
   A library above may hold only what is specific to it: threads in bc-threads, entities in libECRS, diagnostics in libdiagnose, networking in bc-fetch, the language in DOIR.
   Before writing a helper, search the libraries below for it; if it is missing, add it there, with a test, rather than locally.
 - Only libfp, bc-threads, bc-fetch and Mizu's FFI layer (`mizu.ffi`, which loads and calls into native libraries) import `core.sys.*` or call OS APIs; everything else reaches the OS through them.
-- View a plain field atomically through `bc.atomics.asShared`, never a hand-written `cast(shared …)`.
+- View a plain field atomically through `bc.platform.asShared`, never a hand-written `cast(shared …)`.
 - Hold owned memory in a struct through `fp.lifecycle.Owned` rather than hand-written `finalize` and `copyTo` hooks.
 - Compare and hash a value through `fp.lifecycle.equal` and `fp.lifecycle.contentHash`, which use its hooks if it declares them.
   Never `memcmp` or hash a struct's raw bytes: its padding is in them.

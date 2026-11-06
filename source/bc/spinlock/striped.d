@@ -7,7 +7,7 @@
 /// bc.spinlock.lockForWriting(stripeFor(locks, 42));
 /// bc.spinlock.unlockForWriting(stripeFor(locks, 42));
 /// ---
-module bc.striped;
+module bc.spinlock.striped;
 
 static import bc.platform;
 
@@ -23,7 +23,7 @@ static import bc.platform;
 /// assert(&stripeFor(locks, 1) !is &stripeFor(locks, 2) && &stripeFor(locks, 1) is &stripeFor(locks, 5));
 /// ---
 struct Striped(Lock, size_t stripes) {
-	static assert(stripes > 0, "bc.striped: a Striped needs at least one stripe");
+	static assert(stripes > 0, "bc.spinlock.striped: a Striped needs at least one stripe");
 
 	private static struct Padded {
 		align(bc.platform.cacheLineBytes) Lock lock;

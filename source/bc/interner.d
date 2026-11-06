@@ -16,11 +16,11 @@ static import core.atomic;
 static import core.stdc.string;
 
 static import fp.dynarray;
-static import fp.hash;
+static import fp.algorithms;
 static import fp.hashtable;
 static import fp.pointer;
 
-static import bc.atomics;
+static import bc.platform;
 static import bc.spinlock;
 
 @nogc nothrow:
@@ -113,7 +113,7 @@ private const(ubyte)[] bytesOf(T)(const(T)[] items) @trusted {
 
 private size_t hashEntry(T)(inout(ubyte)[] bytes) @trusted {
 	auto e = cast(const(Entry!T)*) bytes.ptr;
-	return cast(size_t) fp.hash.hashBytes(bytesOf(e.items[0 .. e.length]));
+	return cast(size_t) fp.algorithms.hashBytes(bytesOf(e.items[0 .. e.length]));
 }
 
 private bool equalEntry(T)(inout(ubyte)[] a, inout(ubyte)[] b) @trusted {
@@ -165,8 +165,8 @@ private Shard!T* shardOf(T, Id)(ref Interner!(T, Id) interner, ulong hash) {
 /// assert(find(names, "a") == notInterned);
 /// ---
 Id find(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @trusted {
-	if (core.atomic.atomicLoad(bc.atomics.asShared(interner.shards)) is null) return toId!Id(notInterned);
-	auto shard = shardOf(interner, fp.hash.hashBytes(bytesOf(items)));
+	if (core.atomic.atomicLoad(bc.platform.asShared(interner.shards)) is null) return toId!Id(notInterned);
+	auto shard = shardOf(interner, fp.algorithms.hashBytes(bytesOf(items)));
 	bc.spinlock.lockForReading(shard.lock);
 	scope(exit) bc.spinlock.unlockForReading(shard.lock);
 	if (shard.table is null) return toId!Id(notInterned);
@@ -179,7 +179,7 @@ Id find(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @trusted {
 
 // Allocates the shards and the directory if no thread has yet. False on refusal.
 private bool ready(T, Id)(ref Interner!(T, Id) interner) @trusted {
-	if (core.atomic.atomicLoad(bc.atomics.asShared(interner.shards)) !is null) return true;
+	if (core.atomic.atomicLoad(bc.platform.asShared(interner.shards)) !is null) return true;
 	bc.spinlock.lockForWriting(interner.setup);
 	scope(exit) bc.spinlock.unlockForWriting(interner.setup);
 	if (interner.shards !is null) return true;
@@ -194,7 +194,7 @@ private bool ready(T, Id)(ref Interner!(T, Id) interner) @trusted {
 	foreach (i; 0 .. size_t(1) << shardBits) shards[i] = Shard!T.init;
 	interner.pages = directory;
 	// Published last: a thread that sees the shards sees the directory too.
-	core.atomic.atomicStore(bc.atomics.asShared(interner.shards), cast(shared(Shard!T*)) shards);
+	core.atomic.atomicStore(bc.platform.asShared(interner.shards), cast(shared(Shard!T*)) shards);
 	return true;
 }
 
@@ -204,7 +204,7 @@ private uint takeId(T, Id)(ref Interner!(T, Id) interner) @trusted {
 		immutable id = core.atomic.atomicLoad(interner.next);
 		assert(id < maxIds, "bc.interner: id space exhausted");
 		auto page = &interner.pages[id >> pageBits];
-		if (core.atomic.atomicLoad(bc.atomics.asShared(*page)) is null) {
+		if (core.atomic.atomicLoad(bc.platform.asShared(*page)) is null) {
 			bc.spinlock.lockForWriting(interner.setup);
 			if (*page is null) {
 				immutable bytes = (size_t(1) << pageBits) * (const(T)[]).sizeof;
@@ -214,7 +214,7 @@ private uint takeId(T, Id)(ref Interner!(T, Id) interner) @trusted {
 					return refused;
 				}
 				core.stdc.string.memset(fresh, 0, bytes);
-				core.atomic.atomicStore(bc.atomics.asShared(*page), cast(shared(const(T)[]*)) fresh);
+				core.atomic.atomicStore(bc.platform.asShared(*page), cast(shared(const(T)[]*)) fresh);
 			}
 			bc.spinlock.unlockForWriting(interner.setup);
 		}
@@ -240,7 +240,7 @@ Id intern(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @trusted {
 // `intern`, giving the id as a plain number.
 private uint internRaw(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @trusted {
 	if (!ready(interner)) return refused;
-	immutable hash = fp.hash.hashBytes(bytesOf(items));
+	immutable hash = fp.algorithms.hashBytes(bytesOf(items));
 	auto shard = shardOf(interner, hash);
 	// Most interning finds what another thread interned, which readers do side by side.
 	bc.spinlock.lockForReading(shard.lock);

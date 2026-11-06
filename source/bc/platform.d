@@ -22,6 +22,36 @@ enum string backendSelection = q{
 };
 
 
+// --- atomics -------------------------------------------------------------------
+
+// wrapper: names the shared view core.atomic needs of a field declared without `shared`
+/// `value` viewed as `shared`, for `core.atomic.atomicLoad`, `atomicStore`, `atomicOp` and `cas`. Every access to the field while other threads may touch it must go through such a view; a plain read or write races. A `const` field gives a `shared(const)` view, which only loads.
+///
+/// Examples:
+/// ---
+/// static import core.atomic;
+/// bool flag;
+/// core.atomic.atomicStore(asShared(flag), true);
+/// const bool* view = &flag;
+/// assert(core.atomic.atomicLoad(asShared(*view)));
+/// ---
+ref shared(T) asShared(T)(return ref T value) @trusted {
+	return *cast(shared(T)*) &value;
+}
+
+unittest { // views of different widths and qualifiers act on the field itself
+	static import core.atomic;
+	static struct Plain { ubyte small; ulong wide; void* pointer; }
+	Plain p;
+	core.atomic.atomicStore(asShared(p.small), cast(ubyte) 7);
+	assert(core.atomic.cas(&asShared(p.wide), 0UL, 9UL) && p.wide == 9 && p.small == 7);
+	int target;
+	core.atomic.atomicStore(asShared(p.pointer), cast(shared(void*)) &target);
+	assert(p.pointer is &target);
+	const Plain frozen = p;
+	assert(core.atomic.atomicLoad(asShared(frozen.wide)) == 9);
+}
+
 version(unittest) {
 	version(Windows) import core.sys.windows.winbase : Sleep;
 	else version(WASI) private extern(C) int usleep(uint);

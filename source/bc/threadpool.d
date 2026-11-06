@@ -162,7 +162,7 @@ static if(threadingSupported) {
 		pool.stackLock = bc.mutex.create();
 		immutable count = workerCount > 0 ? workerCount : bc.thread.processorCount();
 		// `free` takes a pool with no workers and any of these null, so it can undo a partial `create`.
-		if(pool.wake is null || pool.done is null || pool.stackLock is null || fp.dynarray.resize(pool.handles, count) is null) {
+		if(pool.wake is null || pool.done is null || pool.stackLock is null || fp.dynarray.growToSize(pool.handles, count) is null) {
 			free(pool);
 			return null;
 		}

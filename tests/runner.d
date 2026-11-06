@@ -9,11 +9,10 @@ private enum modules = [
 	"bc.semaphore",
 	"bc.mutex",
 	"bc.spinlock",
-	"bc.readerlock",
+	"bc.spinlock.readerlock",
 	"bc.monitor",
 	"bc.platform",
-	"bc.atomics",
-	"bc.striped",
+	"bc.spinlock.striped",
 	"bc.gate",
 	"bc.interner",
 ];

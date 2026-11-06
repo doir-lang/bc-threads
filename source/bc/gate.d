@@ -16,7 +16,7 @@ module bc.gate;
 
 static import core.atomic;
 
-static import bc.atomics;
+static import bc.platform;
 static import bc.spinlock;
 static import bc.thread;
 
@@ -47,10 +47,10 @@ struct Gate {
 /// ---
 void enterShared(ref Gate gate) {
 	for (;;) {
-		while (core.atomic.atomicLoad(bc.atomics.asShared(gate.exclusiveWaiters)) != 0) bc.thread.yield();
-		core.atomic.atomicOp!"+="(bc.atomics.asShared(gate.sharers), 1);
-		if (core.atomic.atomicLoad(bc.atomics.asShared(gate.exclusiveWaiters)) == 0) return;
-		core.atomic.atomicOp!"-="(bc.atomics.asShared(gate.sharers), 1);
+		while (core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) != 0) bc.thread.yield();
+		core.atomic.atomicOp!"+="(bc.platform.asShared(gate.sharers), 1);
+		if (core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) == 0) return;
+		core.atomic.atomicOp!"-="(bc.platform.asShared(gate.sharers), 1);
 	}
 }
 
@@ -64,7 +64,7 @@ void enterShared(ref Gate gate) {
 /// leaveShared(gate);
 /// ---
 void leaveShared(ref Gate gate) {
-	core.atomic.atomicOp!"-="(bc.atomics.asShared(gate.sharers), 1);
+	core.atomic.atomicOp!"-="(bc.platform.asShared(gate.sharers), 1);
 }
 
 /// A safepoint for a thread sharing the gate: if another thread waits to take it exclusively, steps out until that thread is done, then back in. Call it where the caller's work can tolerate the shared structure changing.
@@ -77,7 +77,7 @@ void leaveShared(ref Gate gate) {
 /// leaveShared(gate);
 /// ---
 void yieldToExclusive(ref Gate gate) {
-	if (core.atomic.atomicLoad(bc.atomics.asShared(gate.exclusiveWaiters)) == 0) return;
+	if (core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) == 0) return;
 	leaveShared(gate);
 	enterShared(gate);
 }
@@ -91,10 +91,10 @@ void yieldToExclusive(ref Gate gate) {
 /// endExclusive(gate, false);
 /// ---
 void beginExclusive(ref Gate gate, bool sharing) {
-	core.atomic.atomicOp!"+="(bc.atomics.asShared(gate.exclusiveWaiters), 1);
+	core.atomic.atomicOp!"+="(bc.platform.asShared(gate.exclusiveWaiters), 1);
 	if (sharing) leaveShared(gate);
 	bc.spinlock.lockForWriting(gate.exclusive);
-	while (core.atomic.atomicLoad(bc.atomics.asShared(gate.sharers)) != 0) bc.thread.yield();
+	while (core.atomic.atomicLoad(bc.platform.asShared(gate.sharers)) != 0) bc.thread.yield();
 }
 
 /// Releases the exclusive hold `beginExclusive` took; with `sharing`, as passed to it, the calling thread enters the gate to share it again.
@@ -109,7 +109,7 @@ void beginExclusive(ref Gate gate, bool sharing) {
 /// ---
 void endExclusive(ref Gate gate, bool sharing) {
 	bc.spinlock.unlockForWriting(gate.exclusive);
-	core.atomic.atomicOp!"-="(bc.atomics.asShared(gate.exclusiveWaiters), 1);
+	core.atomic.atomicOp!"-="(bc.platform.asShared(gate.exclusiveWaiters), 1);
 	if (sharing) enterShared(gate);
 }
 
@@ -128,8 +128,8 @@ version(unittest) {
 		auto s = cast(Shared*) arg;
 		enterShared(s.gate);
 		foreach (i; 0 .. 2000) {
-			if (core.atomic.atomicLoad(bc.atomics.asShared(s.pair[0])) != core.atomic.atomicLoad(bc.atomics.asShared(s.pair[1])))
-				core.atomic.atomicOp!"+="(bc.atomics.asShared(s.mismatches), 1);
+			if (core.atomic.atomicLoad(bc.platform.asShared(s.pair[0])) != core.atomic.atomicLoad(bc.platform.asShared(s.pair[1])))
+				core.atomic.atomicOp!"+="(bc.platform.asShared(s.mismatches), 1);
 			if (i % 50 == 0) {
 				beginExclusive(s.gate, true);
 				++s.pair[0];

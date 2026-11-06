@@ -32,7 +32,7 @@ CONFIG = {
 	'remap_allowed': False,
 	'check_ecrs_writes': False,
 	'exempt': {
-		'hand-written-shared-cast': ['source/bc/atomics.d'],
+		'hand-written-shared-cast': ['source/bc/platform.d'],
 		'posix-yield': ['source/bc/thread.d'],
 		'raw-memcmp': [],
 		'raw-byte-hash': [],
@@ -53,7 +53,7 @@ CRYPTIC = {
 
 # (id, pattern, message, hint)
 PUSHED = [
-	('hand-written-shared-cast', r'\*\s*cast\s*\(\s*shared\s*\(', 'field viewed as shared through a hand-written cast', 'use bc.atomics.asShared'),
+	('hand-written-shared-cast', r'\*\s*cast\s*\(\s*shared\s*\(', 'field viewed as shared through a hand-written cast', 'use bc.platform.asShared'),
 	('posix-yield', r'\bsched_yield\b|\bnanosleep\b|\bclock_gettime\b', 'direct scheduler or clock call', 'use bc.thread.yield, bc.thread.sleep or bc.thread.monotonicSeconds'),
 	('raw-memcmp', r'\bmemcmp\s*\(\s*&', 'struct compared by its raw bytes, padding included', 'use fp.lifecycle.equal'),
 	('raw-byte-hash', r'\b(murmur|hashBytes)\s*\(\s*\(\s*cast\s*\(\s*const\s*\(\s*ubyte\s*\)\s*\*\s*\)\s*&', 'struct hashed by its raw bytes, padding included', 'use fp.lifecycle.contentHash'),
@@ -261,16 +261,16 @@ def check_remap(path, code, config):
 
 
 def check_ecrs_writes(path, code, config):
-	"""Yields an `ECRS-Write` finding for each write through a component reached by a read accessor (`findComponent`, `getComponent`, `ensureComponent`)."""
+	"""Yields an `ECRS-Write` finding for each write through a component reached by a read accessor (`findComponent`, `getComponent`)."""
 	if not config['check_ecrs_writes']:
 		return
-	reader = r'\b(?:findComponent|getComponent|getOrAddComponent|ensureComponent)\s*!'
+	reader = r'\b(?:findComponent|getComponent)\s*!'
 	hint = 'use ecrs.context.getForWriting, findForWriting or setComponent, which count the change and journal it'
-	for match in re.finditer(reader + r'[^;]*?\)\s*(?:\.\s*\w+\s*)*(?:=(?!=)|\+\+|--|[+\-*/~|&]=)', code):
+	for match in re.finditer(reader + r'[^;\n]*?\)\s*(?:\.\s*\w+\s*)*(?:=(?!=)|\+\+|--|[+\-*/~|&]=)', code):
 		yield Finding(path, line_of(code, match.start()), 'ECRS-Write', 'write through a read accessor', hint)
 	for function in functions(code):
-		names = set(re.findall(r'\b(?:auto|const|ref)?\s*(\w+)\s*=\s*&?\s*(?:ecrs\s*\.\s*context\s*\.\s*)?(?:findComponent|getComponent|getOrAddComponent|ensureComponent)\s*!', function.body))
-		names |= set(re.findall(r'\bif\s*\(\s*auto\s+(\w+)\s*=\s*(?:ecrs\s*\.\s*context\s*\.\s*)?(?:findComponent|getComponent|getOrAddComponent|ensureComponent)\s*!', function.body))
+		names = set(re.findall(r'\b(?:auto|const|ref)?\s*(\w+)\s*=\s*&?\s*(?:ecrs\s*\.\s*context\s*\.\s*)?(?:findComponent|getComponent)\s*!', function.body))
+		names |= set(re.findall(r'\bif\s*\(\s*auto\s+(\w+)\s*=\s*(?:ecrs\s*\.\s*context\s*\.\s*)?(?:findComponent|getComponent)\s*!', function.body))
 		for name in names:
 			for write in re.finditer(r'(?:\b%s\s*(?:\.\s*\w+\s*|\[[^\]]*\]\s*)+|\*\s*%s\s*)(?:=(?!=)|\+\+|--|[+\-*/~|&]=)' % (name, name), function.body):
 				yield Finding(path, line_of(code, function.body_start + write.start()), 'ECRS-Write', 'write through `%s`, from a read accessor' % name, hint)
