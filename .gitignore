@@ -12,3 +12,5 @@ bc-threads-test-*
 __test__library__
 __dummy.html
 bin
+__pycache__/
+*.pyc
