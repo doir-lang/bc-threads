@@ -41,6 +41,7 @@ size_t processorCount() @trusted {
 			if(allowed > 0) return cast(size_t) allowed;
 		}
 		immutable n = core.sys.posix.unistd.sysconf(core.sys.posix.unistd._SC_NPROCESSORS_ONLN);
+		assert(n != 0, "bc.thread.processorCount: a machine with no processors online");
 		return n > 0 ? cast(size_t) n : 1;
 	} else version(OSX) {
 		uint n;
@@ -64,7 +65,8 @@ version(OSX) {
 	private enum int darwinClockMonotonic = 6;
 }
 
-/// Gives up the rest of the calling thread's time slice, so a thread spinning on another's progress lets it run: `sched_yield` on POSIX and WASI, `SwitchToThread` on Windows, nothing on a platform without threads. It cannot fail.
+/// Gives up the rest of the calling thread's time slice, so a thread spinning on another's progress lets it run: `sched_yield` on POSIX and WASI, `SwitchToThread` on Windows, nothing on a platform without threads.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -83,7 +85,8 @@ void yield() @trusted {
 	}
 }
 
-/// Suspends the calling thread for at least `microseconds`, sleeping again for what remains when a signal interrupts it; Windows rounds up to whole milliseconds. Returns false if the platform cannot sleep or the OS reports a failure other than an interruption.
+/// Suspends the calling thread for at least `microseconds`, sleeping again for what remains when a signal interrupts it; Windows rounds up to whole milliseconds.
+/// Returns false if the platform cannot sleep or the OS reports a failure other than an interruption.
 ///
 /// Examples:
 /// ---
@@ -98,9 +101,11 @@ bool sleep(ulong microseconds) @trusted {
 			tv_sec: cast(typeof(core.sys.posix.time.timespec.tv_sec))(microseconds / 1_000_000),
 			tv_nsec: cast(typeof(core.sys.posix.time.timespec.tv_nsec))((microseconds % 1_000_000) * 1_000),
 		};
+		assert(request.tv_nsec >= 0 && request.tv_nsec < 1_000_000_000, "bc.thread.sleep: nanoseconds past a second");
 		core.sys.posix.time.timespec remaining;
 		while(core.sys.posix.time.nanosleep(&request, &remaining) != 0) {
 			if(core.stdc.errno.errno != core.stdc.errno.EINTR) return false;
+			assert(remaining.tv_sec <= request.tv_sec, "bc.thread.sleep: an interrupted sleep with more left than it began with");
 			request = remaining;
 		}
 		return true;
@@ -111,7 +116,8 @@ bool sleep(ulong microseconds) @trusted {
 	} else return false;
 }
 
-/// Microseconds since an arbitrary origin fixed for the life of the process, from a clock that never goes backwards: for timing and deadlines, not for the date. It cannot fail on a supported platform; without a monotonic clock it falls back to processor time.
+/// Microseconds since an arbitrary origin fixed for the life of the process, from a clock that never goes backwards: for timing and deadlines, not for the date.
+/// It cannot fail on a supported platform; without a monotonic clock it falls back to processor time.
 ///
 /// Examples:
 /// ---
@@ -121,8 +127,10 @@ bool sleep(ulong microseconds) @trusted {
 ulong monotonicMicroseconds() @trusted {
 	version(Posix) {
 		core.sys.posix.time.timespec now;
-		version(OSX) cast(void) clock_gettime(darwinClockMonotonic, &now);
-		else cast(void) core.sys.posix.time.clock_gettime(core.sys.posix.time.CLOCK_MONOTONIC, &now);
+		version(OSX) immutable read = clock_gettime(darwinClockMonotonic, &now);
+		else immutable read = core.sys.posix.time.clock_gettime(core.sys.posix.time.CLOCK_MONOTONIC, &now);
+		assert(read == 0, "bc.thread.monotonicMicroseconds: no monotonic clock");
+		assert(now.tv_sec >= 0 && now.tv_nsec >= 0 && now.tv_nsec < 1_000_000_000, "bc.thread.monotonicMicroseconds: a time outside its range");
 		return cast(ulong) now.tv_sec * 1_000_000 + cast(ulong) now.tv_nsec / 1_000;
 	} else version(Windows) {
 		static import core.sys.windows.winbase;
@@ -167,7 +175,8 @@ static if(threadingSupported) {
 	}
 
 
-	/// Starts `entry(arg)` on a new thread. Several `bc` modules define `create`, so call it fully qualified, as `bc.thread.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
+	/// Starts `entry(arg)` on a new thread.
+	/// Several `bc` modules define `create`, so call it fully qualified, as `bc.thread.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
 	///
 	/// Returns an empty `Nullable` if the OS cannot start one.
 	///
@@ -183,6 +192,7 @@ static if(threadingSupported) {
 	/// assert(ran == 1);
 	/// ---
 	std.typecons.Nullable!Thread create(ThreadFunction entry, void* arg) @trusted {
+		assert(entry !is null, "bc.thread.create: a thread with nothing to run");
 		debug if(bc.platform.simulatedFailure()) return std.typecons.Nullable!Thread.init;
 		Thread t;
 		version(PthreadBackend) {
@@ -196,6 +206,7 @@ static if(threadingSupported) {
 
 	version(PthreadBackend) {
 		private extern(C) void* closureTrampoline(F, Args...)(void* arg) {
+			assert(arg !is null, "bc.thread: a closure thread with no closure");
 			auto closure = cast(Closure!(F, Args)*) arg;
 			closure.entry(closure.args);
 			core.stdc.stdlib.free(closure);
@@ -210,7 +221,8 @@ static if(threadingSupported) {
 		}
 	}
 
-	/// Starts `entry(args)` on a new thread, passing it a heap copy of `args` that the thread frees once `entry` returns. Several `bc` modules define `create`, so call it fully qualified, as `bc.thread.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
+	/// Starts `entry(args)` on a new thread, passing it a heap copy of `args` that the thread frees once `entry` returns.
+	/// Several `bc` modules define `create`, so call it fully qualified, as `bc.thread.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
 	///
 	/// Returns an empty `Nullable`, having freed the copy, if allocation fails or the OS cannot start a thread.
 	///
@@ -227,6 +239,7 @@ static if(threadingSupported) {
 	std.typecons.Nullable!Thread create(F, Args...)(F entry, Args args) @trusted
 	if(is(typeof(entry(args))) && !is(F == ThreadFunction)) {
 		alias closureType = Closure!(F, Args);
+		assert(entry !is null, "bc.thread.create: a thread with nothing to run");
 		debug if(bc.platform.simulatedFailure()) return std.typecons.Nullable!Thread.init;
 		auto closure = cast(closureType*) core.stdc.stdlib.malloc(closureType.sizeof);
 		if(closure is null) return std.typecons.Nullable!Thread.init;
@@ -247,14 +260,18 @@ static if(threadingSupported) {
 	/// join(t.get);
 	/// ---
 	void join(ref Thread t) @trusted {
-		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_join(t.handle, null);
+		version(PthreadBackend) {
+			immutable joined = core.sys.posix.pthread.pthread_join(t.handle, null);
+			assert(joined == 0, "bc.thread.join: a thread already joined or detached, or this thread itself");
+		}
 		else version(Windows) {
 			cast(void) core.sys.windows.windows.WaitForSingleObject(t.handle, core.sys.windows.windows.INFINITE);
 			cast(void) core.sys.windows.windows.CloseHandle(t.handle);
 		}
 	}
 
-	/// Lets `t` run unjoined, releasing it when it finishes, for a thread nothing will wait for. Call this or `join` on a thread, once, not both.
+	/// Lets `t` run unjoined, releasing it when it finishes, for a thread nothing will wait for.
+	/// Call this or `join` on a thread, once, not both.
 	///
 	/// Examples:
 	/// ---
@@ -264,7 +281,10 @@ static if(threadingSupported) {
 	/// detach(t.get);
 	/// ---
 	void detach(ref Thread t) @trusted {
-		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_detach(t.handle);
+		version(PthreadBackend) {
+			immutable detached = core.sys.posix.pthread.pthread_detach(t.handle);
+			assert(detached == 0, "bc.thread.detach: a thread already joined or detached");
+		}
 		else version(Windows) cast(void) core.sys.windows.windows.CloseHandle(t.handle);
 	}
 

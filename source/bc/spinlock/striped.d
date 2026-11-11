@@ -14,7 +14,8 @@ static import bc.platform;
 @nogc nothrow:
 
 
-/// `stripes` locks of type `Lock`, each padded to `bc.platform.cacheLineBytes`. Its `.init` holds `Lock.init` in every stripe, so it suits a lock whose `.init` is unlocked, such as `bc.spinlock.SpinLock`.
+/// `stripes` locks of type `Lock`, each padded to `bc.platform.cacheLineBytes`.
+/// Its `.init` holds `Lock.init` in every stripe, so it suits a lock whose `.init` is unlocked, such as `bc.spinlock.SpinLock`.
 ///
 /// Examples:
 /// ---
@@ -31,7 +32,8 @@ struct Striped(Lock, size_t stripes) {
 	private Padded[stripes] padded;
 }
 
-/// The stripe guarding `key`: the same lock for the same key, and for keys equal modulo the number of stripes. Hold it briefly, since every key on the stripe waits for it.
+/// The stripe guarding `key`: the same lock for the same key, and for keys equal modulo the number of stripes.
+/// Hold it briefly, since every key on the stripe waits for it.
 ///
 /// Examples:
 /// ---

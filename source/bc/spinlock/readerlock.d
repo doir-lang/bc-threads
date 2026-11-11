@@ -23,7 +23,8 @@ static import bc.spinlock;
 /// How many shards a `ReaderLock` has.
 enum size_t readerShards = 16;
 
-/// A reader-writer lock whose `.init` is unlocked. A thread already holding it must not take it again.
+/// A reader-writer lock whose `.init` is unlocked.
+/// A thread already holding it must not take it again.
 ///
 /// Examples:
 /// ---
@@ -44,6 +45,7 @@ private size_t ownShard = noShard; // module scope, so one per thread; the shard
 
 private ref bc.spinlock.SpinLock shardOf(return ref ReaderLock self) {
 	if(ownShard == noShard) ownShard = core.atomic.atomicOp!"+="(shardsGiven, 1) % readerShards;
+	assert(ownShard < readerShards, "bc.spinlock.readerlock: a shard past the lock's");
 	return self.shards[ownShard].lock;
 }
 
@@ -96,6 +98,7 @@ bool tryLockForReading(ref ReaderLock self) { return bc.spinlock.tryLockForReadi
 /// ---
 void lockForWriting(ref ReaderLock self) {
 	foreach(ref shard; self.shards) bc.spinlock.lockForWriting(shard.lock);
+	foreach(ref shard; self.shards) assert(bc.spinlock.isLockedForWriting(shard.lock), "bc.spinlock.readerlock: a write hold missing a shard");
 }
 
 /// Releases the exclusive hold on `self`.
@@ -109,6 +112,7 @@ void lockForWriting(ref ReaderLock self) {
 /// unlockForReading(l);
 /// ---
 void unlockForWriting(ref ReaderLock self) {
+	foreach(ref shard; self.shards) assert(bc.spinlock.isLockedForWriting(shard.lock), "bc.spinlock.readerlock: releasing a write hold missing a shard");
 	foreach(ref shard; self.shards) bc.spinlock.unlockForWriting(shard.lock);
 }
 
@@ -127,6 +131,7 @@ bool tryLockForWriting(ref ReaderLock self) {
 			foreach(ref taken; self.shards[0 .. i]) bc.spinlock.unlockForWriting(taken.lock);
 			return false;
 		}
+	foreach(ref shard; self.shards) assert(bc.spinlock.isLockedForWriting(shard.lock), "bc.spinlock.readerlock: a write hold missing a shard");
 	return true;
 }
 

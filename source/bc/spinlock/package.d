@@ -5,7 +5,9 @@ static import core.atomic;
 
 @nogc nothrow:
 
-/// A test-and-test-and-set reader-writer spinlock for short critical sections; `bc.mutex` sleeps instead, so suits long ones. Never copy one that is held. A waiting writer does not hold off new readers, so a steady stream of them can starve it.
+/// A test-and-test-and-set reader-writer spinlock for short critical sections; `bc.mutex` sleeps instead, so suits long ones.
+/// Never copy one that is held.
+/// A waiting writer does not hold off new readers, so a steady stream of them can starve it.
 struct SpinLock {
 	// 0 when free, the number of readers while read-held, -1 while write-held.
 	private shared int state = 0;
@@ -65,8 +67,11 @@ bool isLockedForReading(ref SpinLock self) @trusted {
 bool tryLockForReading(ref SpinLock self) @trusted {
 	int current = core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state);
 	// A failed `cas` stores the value it found in `current`, so the loop retries against that.
-	while(current >= 0)
+	while(current >= 0) {
+		assert(current < int.max, "bc.spinlock: more readers than the count holds");
 		if(core.atomic.cas(&self.state, &current, current + 1)) return true;
+	}
+	assert(current == -1, "bc.spinlock: a lock state that is neither readers nor one writer");
 	return false;
 }
 
@@ -83,6 +88,7 @@ void lockForReading(ref SpinLock self) @trusted {
 	// Spin on plain loads so waiters share the cache line, rather than each `cas` stealing it from the holder.
 	while(!tryLockForReading(self))
 		while(core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state) < 0) core.atomic.pause();
+	assert(core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state) > 0, "bc.spinlock: a read hold that left the lock unheld");
 }
 
 /// Releases a shared hold on `self`, which must be read-held.
@@ -110,10 +116,13 @@ void unlockForReading(ref SpinLock self) @trusted {
 /// unlockForWriting(l);
 /// ---
 bool tryLockForWriting(ref SpinLock self) @trusted {
-	return core.atomic.cas(&self.state, 0, -1);
+	immutable taken = core.atomic.cas(&self.state, 0, -1);
+	assert(!taken || core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state) == -1, "bc.spinlock: a write hold that left the lock unheld");
+	return taken;
 }
 
-/// Spins until nobody holds `self`, then takes the exclusive hold on it. Not reentrant: a thread already holding `self` spins forever.
+/// Spins until nobody holds `self`, then takes the exclusive hold on it.
+/// Not reentrant: a thread already holding `self` spins forever.
 ///
 /// Examples:
 /// ---
@@ -125,6 +134,7 @@ bool tryLockForWriting(ref SpinLock self) @trusted {
 void lockForWriting(ref SpinLock self) @trusted {
 	while(!tryLockForWriting(self))
 		while(core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state) != 0) core.atomic.pause();
+	assert(core.atomic.atomicLoad!(core.atomic.MemoryOrder.raw)(self.state) == -1, "bc.spinlock: a write hold that left the lock unheld");
 }
 
 /// Releases the exclusive hold on `self`, which must be write-held.

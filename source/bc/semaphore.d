@@ -45,7 +45,8 @@ static if(bc.platform.threadingSupported) {
 	else version(Windows) struct Semaphore { HANDLE handle; }
 
 
-	/// Allocates a semaphore whose count starts at `initial`, which must not exceed `maxCount`. Several `bc` modules define `create`, so call it fully qualified, as `bc.semaphore.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
+	/// Allocates a semaphore whose count starts at `initial`, which must not exceed `maxCount`.
+	/// Several `bc` modules define `create`, so call it fully qualified, as `bc.semaphore.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
 	///
 	/// Returns null, having freed what it allocated, if allocation fails or the OS cannot create one.
 	///
@@ -75,10 +76,12 @@ static if(bc.platform.threadingSupported) {
 			fp.pointer.free(s);
 			return null;
 		}
+		version(unittest) version(linux) assert(value(s) == initial, "bc.semaphore.create: a count other than the one asked for");
 		return s;
 	}
 
-	/// Destroys and frees `s`, which no thread may still be waiting on; does nothing if `s` is null. Freeing `s` twice is undefined.
+	/// Destroys and frees `s`, which no thread may still be waiting on; does nothing if `s` is null.
+	/// Freeing `s` twice is undefined.
 	///
 	/// Examples:
 	/// ---
@@ -87,7 +90,10 @@ static if(bc.platform.threadingSupported) {
 	/// ---
 	void free(Semaphore* s) @trusted {
 		if(s is null) return;
-		version(PosixSemaphore) cast(void) sem_destroy(&s.handle);
+		version(PosixSemaphore) {
+			immutable destroyed = sem_destroy(&s.handle);
+			assert(destroyed == 0, "bc.semaphore.free: destroying a semaphore that is not live");
+		}
 		else version(OSX) cast(void) semaphore_destroy(mach_task_self(), s.handle);
 		else version(Windows) cast(void) CloseHandle(s.handle);
 		fp.pointer.free(s);
@@ -104,13 +110,19 @@ static if(bc.platform.threadingSupported) {
 	/// free(s);
 	/// ---
 	void wait(Semaphore* s) @trusted {
+		assert(s !is null, "bc.semaphore.wait: no semaphore");
 		// A signal interrupts the wait without a post, so retry; any other failure means `s` is not a live semaphore.
-		version(PosixSemaphore) while(sem_wait(&s.handle) != 0 && errno == EINTR) {}
+		version(PosixSemaphore) {
+			int result;
+			while((result = sem_wait(&s.handle)) != 0 && errno == EINTR) {}
+			assert(result == 0, "bc.semaphore.wait: waiting on a semaphore that is not live");
+		}
 		else version(OSX) while(semaphore_wait(s.handle) == KERN_ABORTED) {}
 		else version(Windows) cast(void) WaitForSingleObject(s.handle, INFINITE);
 	}
 
-	/// Increments the count of `s`, waking one thread blocked in `wait` on it, if any. A post that would raise the count above `maxCount` is lost.
+	/// Increments the count of `s`, waking one thread blocked in `wait` on it, if any.
+	/// A post that would raise the count above `maxCount` is lost.
 	///
 	/// Examples:
 	/// ---
@@ -122,7 +134,11 @@ static if(bc.platform.threadingSupported) {
 	/// free(s);
 	/// ---
 	void post(Semaphore* s) @trusted {
-		version(PosixSemaphore) cast(void) sem_post(&s.handle);
+		assert(s !is null, "bc.semaphore.post: no semaphore");
+		version(PosixSemaphore) {
+			immutable posted = sem_post(&s.handle);
+			assert(posted == 0, "bc.semaphore.post: a semaphore that is not live, or past maxCount");
+		}
 		else version(OSX) cast(void) semaphore_signal(s.handle);
 		else version(Windows) cast(void) ReleaseSemaphore(s.handle, 1, null);
 	}
