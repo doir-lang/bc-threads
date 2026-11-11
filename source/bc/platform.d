@@ -3,7 +3,8 @@ module bc.platform;
 
 @nogc nothrow:
 
-/// Whether the target has OS threads, semaphores and locks. Where it does not, pools run jobs inline and `bc.mutex` spins.
+/// Whether the target has OS threads, semaphores and locks.
+/// Where it does not, pools run jobs inline and `bc.mutex` spins.
 version(linux) enum bool threadingSupported = true;
 else version(OSX) enum bool threadingSupported = true;
 else version(Windows) enum bool threadingSupported = true;
@@ -14,7 +15,8 @@ else enum bool threadingSupported = false;
 /// The bytes a value is padded to so threads writing neighbouring ones never share a cache line: 64 on the x86-64 and ARM cores this library targets.
 enum size_t cacheLineBytes = 64;
 
-/// Mixed in, declares `version(PthreadBackend)` on Linux, macOS and WASI. Version identifiers are module-local, so each module that branches on it mixes this in.
+/// Mixed in, declares `version(PthreadBackend)` on Linux, macOS and WASI.
+/// Version identifiers are module-local, so each module that branches on it mixes this in.
 enum string backendSelection = q{
 	version(linux) version = PthreadBackend;
 	else version(OSX) version = PthreadBackend;
@@ -25,7 +27,9 @@ enum string backendSelection = q{
 // --- atomics -------------------------------------------------------------------
 
 // wrapper: names the shared view core.atomic needs of a field declared without `shared`
-/// `value` viewed as `shared`, for `core.atomic.atomicLoad`, `atomicStore`, `atomicOp` and `cas`. Every access to the field while other threads may touch it must go through such a view; a plain read or write races. A `const` field gives a `shared(const)` view, which only loads.
+/// `value` viewed as `shared`, for `core.atomic.atomicLoad`, `atomicStore`, `atomicOp` and `cas`.
+/// Every access to the field while other threads may touch it must go through such a view; a plain read or write races.
+/// A `const` field gives a `shared(const)` view, which only loads.
 ///
 /// Examples:
 /// ---
@@ -57,7 +61,8 @@ version(unittest) {
 	else version(WASI) private extern(C) int usleep(uint);
 	else import core.sys.posix.unistd : usleep;
 
-	/// Sleeps the calling thread for about `ms` milliseconds, for tests that give another thread time to act. It exists only in unittest builds.
+	/// Sleeps the calling thread for about `ms` milliseconds, for tests that give another thread time to act.
+	/// It exists only in unittest builds.
 	///
 	/// Examples:
 	/// ---
@@ -78,7 +83,8 @@ debug {
 	private size_t acquisitionsLeft;
 	private fp.pointer.Allocator realAllocFunction;
 
-	/// Whether the acquisition the caller is about to make, an allocation or an OS object, should fail as `failAfter` arranged. It exists only in debug builds, so callers check it under `debug`.
+	/// Whether the acquisition the caller is about to make, an allocation or an OS object, should fail as `failAfter` arranged.
+	/// It exists only in debug builds, so callers check it under `debug`.
 	///
 	/// Examples:
 	/// ---
@@ -87,6 +93,7 @@ debug {
 	pragma(inline, true)
 	package bool simulatedFailure() {
 		if(!failureArmed || acquisitionsLeft-- > 0) return false;
+		assert(realAllocFunction !is null, "bc.platform: a failure armed with no allocator to restore");
 		failureArmed = false;
 		fp.pointer.allocator = realAllocFunction;
 		return true;
@@ -100,7 +107,10 @@ debug version(unittest) {
 		return realAllocFunction(p, size);
 	}
 
-	/// Lets the next `n` acquisitions on this thread succeed and makes the one after fail, then lets later ones succeed. Acquisitions are allocations through `fp.pointer` and anything else, such as creating an OS object, that checks `simulatedFailure`. Calling it again before the failure happens replaces the earlier arrangement. It exists only in debug unittest builds.
+	/// Lets the next `n` acquisitions on this thread succeed and makes the one after fail, then lets later ones succeed.
+	/// Acquisitions are allocations through `fp.pointer` and anything else, such as creating an OS object, that checks `simulatedFailure`.
+	/// Calling it again before the failure happens replaces the earlier arrangement.
+	/// It exists only in debug unittest builds.
 	///
 	/// Examples:
 	/// ---

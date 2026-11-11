@@ -1,4 +1,5 @@
-/// A stop-the-world gate: many threads work inside it at once, sharing a structure, and one thread at a time takes it exclusively to change that structure, which waits until every sharing thread has paused at a safepoint. A sharing thread pauses only where it calls `yieldToExclusive`, so a structural change never lands in the middle of its work.
+/// A stop-the-world gate: many threads work inside it at once, sharing a structure, and one thread at a time takes it exclusively to change that structure, which waits until every sharing thread has paused at a safepoint.
+/// A sharing thread pauses only where it calls `yieldToExclusive`, so a structural change never lands in the middle of its work.
 ///
 /// Unlike a reader-writer lock, a waiting exclusive holder holds off new sharers, so it cannot starve, and a sharer may take the gate exclusively itself without leaving its own work.
 /// What a thread holds is the caller's to track, and is passed in where it matters; the gate keeps only counts.
@@ -23,7 +24,8 @@ static import bc.thread;
 @nogc nothrow:
 
 
-/// The gate: how many threads are inside it sharing, how many wait for or hold it exclusively, and the lock exclusive holders take in turn. Its `.init` is open and empty.
+/// The gate: how many threads are inside it sharing, how many wait for or hold it exclusively, and the lock exclusive holders take in turn.
+/// Its `.init` is open and empty.
 ///
 /// Examples:
 /// ---
@@ -48,8 +50,10 @@ struct Gate {
 void enterShared(ref Gate gate) {
 	for(;;) {
 		while(core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) != 0) bc.thread.yield();
-		core.atomic.atomicOp!"+="(bc.platform.asShared(gate.sharers), 1);
+		immutable sharers = core.atomic.atomicOp!"+="(bc.platform.asShared(gate.sharers), 1);
+		assert(sharers > 0, "bc.gate: the sharer count wrapped");
 		if(core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) == 0) return;
+		assert(core.atomic.atomicLoad(bc.platform.asShared(gate.sharers)) > 0, "bc.gate: backing out of a share no thread holds");
 		core.atomic.atomicOp!"-="(bc.platform.asShared(gate.sharers), 1);
 	}
 }
@@ -64,10 +68,12 @@ void enterShared(ref Gate gate) {
 /// leaveShared(gate);
 /// ---
 void leaveShared(ref Gate gate) {
+	assert(core.atomic.atomicLoad(bc.platform.asShared(gate.sharers)) > 0, "bc.gate: leaving a gate no thread shares");
 	core.atomic.atomicOp!"-="(bc.platform.asShared(gate.sharers), 1);
 }
 
-/// A safepoint for a thread sharing the gate: if another thread waits to take it exclusively, steps out until that thread is done, then back in. Call it where the caller's work can tolerate the shared structure changing.
+/// A safepoint for a thread sharing the gate: if another thread waits to take it exclusively, steps out until that thread is done, then back in.
+/// Call it where the caller's work can tolerate the shared structure changing.
 ///
 /// Examples:
 /// ---
@@ -77,12 +83,16 @@ void leaveShared(ref Gate gate) {
 /// leaveShared(gate);
 /// ---
 void yieldToExclusive(ref Gate gate) {
+	assert(core.atomic.atomicLoad(bc.platform.asShared(gate.sharers)) > 0, "bc.gate: yielding a share this thread does not hold");
 	if(core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) == 0) return;
 	leaveShared(gate);
 	enterShared(gate);
+	assert(core.atomic.atomicLoad(bc.platform.asShared(gate.sharers)) > 0, "bc.gate: came back from yielding without a share");
 }
 
-/// Takes the gate exclusively, waiting until every other sharing thread has paused at a safepoint and every earlier exclusive holder is done. `sharing` says whether the calling thread itself shares the gate, in which case it steps out for the exclusive hold. It does not nest; a caller that holds the gate exclusively must count its own nested holds.
+/// Takes the gate exclusively, waiting until every other sharing thread has paused at a safepoint and every earlier exclusive holder is done.
+/// `sharing` says whether the calling thread itself shares the gate, in which case it steps out for the exclusive hold.
+/// It does not nest; a caller that holds the gate exclusively must count its own nested holds.
 ///
 /// Examples:
 /// ---
@@ -91,10 +101,12 @@ void yieldToExclusive(ref Gate gate) {
 /// endExclusive(gate, false);
 /// ---
 void beginExclusive(ref Gate gate, bool sharing) {
+	assert(!sharing || core.atomic.atomicLoad(bc.platform.asShared(gate.sharers)) > 0, "bc.gate: giving up a share this thread does not hold");
 	core.atomic.atomicOp!"+="(bc.platform.asShared(gate.exclusiveWaiters), 1);
 	if(sharing) leaveShared(gate);
 	bc.spinlock.lockForWriting(gate.exclusive);
 	while(core.atomic.atomicLoad(bc.platform.asShared(gate.sharers)) != 0) bc.thread.yield();
+	assert(bc.spinlock.isLockedForWriting(gate.exclusive) && core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) > 0, "bc.gate: an exclusive hold without the lock or its count");
 }
 
 /// Releases the exclusive hold `beginExclusive` took; with `sharing`, as passed to it, the calling thread enters the gate to share it again.
@@ -108,7 +120,9 @@ void beginExclusive(ref Gate gate, bool sharing) {
 /// leaveShared(gate);
 /// ---
 void endExclusive(ref Gate gate, bool sharing) {
+	assert(bc.spinlock.isLockedForWriting(gate.exclusive), "bc.gate: ending an exclusive hold that was not begun");
 	bc.spinlock.unlockForWriting(gate.exclusive);
+	assert(core.atomic.atomicLoad(bc.platform.asShared(gate.exclusiveWaiters)) > 0, "bc.gate: ending an exclusive hold no thread began");
 	core.atomic.atomicOp!"-="(bc.platform.asShared(gate.exclusiveWaiters), 1);
 	if(sharing) enterShared(gate);
 }

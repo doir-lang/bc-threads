@@ -35,7 +35,8 @@ static if(bc.platform.threadingSupported) {
 	else version(Windows) struct Mutex { SRWLOCK handle; }
 
 
-	/// Allocates an unlocked mutex. Several `bc` modules define `create`, so call it fully qualified, as `bc.mutex.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
+	/// Allocates an unlocked mutex.
+	/// Several `bc` modules define `create`, so call it fully qualified, as `bc.mutex.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
 	///
 	/// Returns null, having freed what it allocated, if allocation or initialization fails.
 	///
@@ -57,10 +58,16 @@ static if(bc.platform.threadingSupported) {
 				return null;
 			}
 		} else version(Windows) InitializeSRWLock(&m.handle);
+		version(assert) {
+			immutable unheld = tryLockForWriting(m);
+			if(unheld) unlockForWriting(m);
+			assert(unheld, "bc.mutex.create: a new mutex that is already held");
+		}
 		return m;
 	}
 
-	/// Destroys and frees `m`, which no thread may hold; does nothing if `m` is null. Freeing `m` twice is undefined.
+	/// Destroys and frees `m`, which no thread may hold; does nothing if `m` is null.
+	/// Freeing `m` twice is undefined.
 	///
 	/// Examples:
 	/// ---
@@ -69,7 +76,10 @@ static if(bc.platform.threadingSupported) {
 	/// ---
 	void free(Mutex* m) @trusted {
 		if(m is null) return;
-		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_destroy(&m.handle);
+		version(PthreadBackend) {
+			immutable destroyed = core.sys.posix.pthread.pthread_rwlock_destroy(&m.handle);
+			assert(destroyed == 0, "bc.mutex.free: destroying a mutex that is held");
+		}
 		fp.pointer.free(m);
 	}
 
@@ -84,11 +94,13 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	bool tryLockForReading(Mutex* m) @trusted {
+		assert(m !is null, "bc.mutex: locking no mutex");
 		version(PthreadBackend) return core.sys.posix.pthread.pthread_rwlock_tryrdlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockShared(&m.handle) != 0;
 	}
 
-	/// Waits until no writer holds `m`, then takes a shared hold on it. The calling thread must not already hold `m`: Windows forbids a second shared hold, and a writer-preferring rwlock deadlocks on one.
+	/// Waits until no writer holds `m`, then takes a shared hold on it.
+	/// The calling thread must not already hold `m`: Windows forbids a second shared hold, and a writer-preferring rwlock deadlocks on one.
 	///
 	/// Examples:
 	/// ---
@@ -98,7 +110,11 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	void lockForReading(Mutex* m) @trusted {
-		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_rdlock(&m.handle);
+		assert(m !is null, "bc.mutex: locking no mutex");
+		version(PthreadBackend) {
+			immutable result = core.sys.posix.pthread.pthread_rwlock_rdlock(&m.handle);
+			assert(result == 0, "bc.mutex: a read hold the thread may not take, as one it already has");
+		}
 		else version(Windows) AcquireSRWLockShared(&m.handle);
 	}
 
@@ -114,7 +130,11 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	void unlockForReading(Mutex* m) @trusted {
-		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_unlock(&m.handle);
+		assert(m !is null, "bc.mutex: locking no mutex");
+		version(PthreadBackend) {
+			immutable result = core.sys.posix.pthread.pthread_rwlock_unlock(&m.handle);
+			assert(result == 0, "bc.mutex: unlocking a lock this thread does not hold");
+		}
 		else version(Windows) ReleaseSRWLockShared(&m.handle);
 	}
 
@@ -130,11 +150,13 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	bool tryLockForWriting(Mutex* m) @trusted {
+		assert(m !is null, "bc.mutex: locking no mutex");
 		version(PthreadBackend) return core.sys.posix.pthread.pthread_rwlock_trywrlock(&m.handle) == 0;
 		else version(Windows) return TryAcquireSRWLockExclusive(&m.handle) != 0;
 	}
 
-	/// Waits until nobody holds `m`, then takes the exclusive hold on it. The calling thread must not already hold `m`.
+	/// Waits until nobody holds `m`, then takes the exclusive hold on it.
+	/// The calling thread must not already hold `m`.
 	///
 	/// Examples:
 	/// ---
@@ -144,7 +166,11 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	void lockForWriting(Mutex* m) @trusted {
-		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_wrlock(&m.handle);
+		assert(m !is null, "bc.mutex: locking no mutex");
+		version(PthreadBackend) {
+			immutable result = core.sys.posix.pthread.pthread_rwlock_wrlock(&m.handle);
+			assert(result == 0, "bc.mutex: a write hold the thread may not take, as one it already has");
+		}
 		else version(Windows) AcquireSRWLockExclusive(&m.handle);
 	}
 
@@ -160,7 +186,11 @@ static if(bc.platform.threadingSupported) {
 	/// free(m);
 	/// ---
 	void unlockForWriting(Mutex* m) @trusted {
-		version(PthreadBackend) cast(void) core.sys.posix.pthread.pthread_rwlock_unlock(&m.handle);
+		assert(m !is null, "bc.mutex: locking no mutex");
+		version(PthreadBackend) {
+			immutable result = core.sys.posix.pthread.pthread_rwlock_unlock(&m.handle);
+			assert(result == 0, "bc.mutex: unlocking a lock this thread does not hold");
+		}
 		else version(Windows) ReleaseSRWLockExclusive(&m.handle);
 	}
 
@@ -176,11 +206,14 @@ static if(bc.platform.threadingSupported) {
 		auto m = fp.pointer.allocate!Mutex(1);
 		if(m is null) return null;
 		*m = Mutex.init;
+		assert(!bc.spinlock.isLocked(m.lock), "bc.mutex.create: a new mutex that is already held");
 		return m;
 	}
 
-	// wrapper: the threadless build keeps the threaded API
-	void free(Mutex* m) @trusted { fp.pointer.free(m); }
+	void free(Mutex* m) @trusted {
+		assert(m is null || !bc.spinlock.isLocked(m.lock), "bc.mutex.free: freeing a mutex that is held");
+		fp.pointer.free(m);
+	}
 
 
 	// wrapper: the threadless build keeps the threaded API

@@ -38,7 +38,8 @@ private enum bool hasTryLocks(L) = __traits(compiles, (ref L l) @nogc nothrow {
 
 private enum bool hasFree(L) = __traits(compiles, (ref L l) @nogc nothrow { lockScope!L.free(l); });
 
-/// Whether `L` can lock a `Monitor`: the module (or other scope) declaring `L`, or its pointee when `L` is a pointer, has free functions `lockForReading`, `unlockForReading`, `lockForWriting` and `unlockForWriting`, each `@nogc nothrow` and taking an `L` by value or `ref`. A pointer lock's scope also has `L create()`, since its `.init` is null; any other lock's `.init` must be unlocked, and a `create` it has instead makes the monitor's lock.
+/// Whether `L` can lock a `Monitor`: the module (or other scope) declaring `L`, or its pointee when `L` is a pointer, has free functions `lockForReading`, `unlockForReading`, `lockForWriting` and `unlockForWriting`, each `@nogc nothrow` and taking an `L` by value or `ref`.
+/// A pointer lock's scope also has `L create()`, since its `.init` is null; any other lock's `.init` must be unlocked, and a `create` it has instead makes the monitor's lock.
 ///
 /// The scope may also have `bool tryLockForReading(L)` and `bool tryLockForWriting(L)`, which give the monitor `tryRead` and `tryWrite`, and `free(L)`, which `Monitor.finalize` calls on the lock.
 ///
@@ -61,7 +62,10 @@ enum bool isLock(L) = __traits(compiles, lockScope!L) && (hasCreate!L ? is(typeo
 
 /// A `T` reachable only through the guards `read` and `write` give, under a `Lock` meeting `isLock`.
 ///
-/// With the default `bc.spinlock.SpinLock`, `.init` is ready, holding `T.init`, so a `__gshared` monitor needs no `create`; going out of scope runs `T`'s destructor, but a `T` with a libfp `finalize` needs `fp.lifecycle.endLifetime` on the monitor. A pointer lock comes from its `create`, so its monitors do too, since its `.init` is null. Like the plain data holding it, a monitor copies its lock and value bytewise: never copy a held one, and end only one copy of a pointer lock's monitor. It has the reentrancy and starvation caveats of its lock: under either lock in this library, a thread already holding it must not take it again.
+/// With the default `bc.spinlock.SpinLock`, `.init` is ready, holding `T.init`, so a `__gshared` monitor needs no `create`; going out of scope runs `T`'s destructor, but a `T` with a libfp `finalize` needs `fp.lifecycle.endLifetime` on the monitor.
+/// A pointer lock comes from its `create`, so its monitors do too, since its `.init` is null.
+/// Like the plain data holding it, a monitor copies its lock and value bytewise: never copy a held one, and end only one copy of a pointer lock's monitor.
+/// It has the reentrancy and starvation caveats of its lock: under either lock in this library, a thread already holding it must not take it again.
 ///
 /// Examples:
 /// ---
@@ -75,7 +79,8 @@ struct Monitor(T, Lock = bc.spinlock.SpinLock) {
 	private Lock lock;
 	private T value;
 
-	/// Ends the value's lifetime and frees the lock if `Lock`'s scope defines `free`, leaving the monitor empty; libfp calls it when it ends a monitor's lifetime, as `fp.pointer.free` does. No thread may hold the monitor.
+	/// Ends the value's lifetime and frees the lock if `Lock`'s scope defines `free`, leaving the monitor empty; libfp calls it when it ends a monitor's lifetime, as `fp.pointer.free` does.
+	/// No thread may hold the monitor.
 	///
 	/// Examples:
 	/// ---
@@ -84,13 +89,16 @@ struct Monitor(T, Lock = bc.spinlock.SpinLock) {
 	/// fp.pointer.free(m); // calls `finalize`
 	/// ---
 	void finalize() {
+		static if(__traits(compiles, lockScope!Lock.isLocked(lock))) assert(!lockScope!Lock.isLocked(lock), "bc.monitor: ending a monitor while it is held");
 		fp.lifecycle.endLifetime(value);
 		static if(hasFree!Lock) lockScope!Lock.free(lock);
 		lock = Lock.init;
 	}
 }
 
-/// A shared hold on a monitor, released when the guard is destroyed, giving `const` access to its value. An empty guard, from a failed `tryRead`, holds nothing and converts to `false`. The `ref` that `value` returns must not outlive the guard, and a temporary guard, as in `read(m).value`, holds until the end of the whole expression.
+/// A shared hold on a monitor, released when the guard is destroyed, giving `const` access to its value.
+/// An empty guard, from a failed `tryRead`, holds nothing and converts to `false`.
+/// The `ref` that `value` returns must not outlive the guard, and a temporary guard, as in `read(m).value`, holds until the end of the whole expression.
 ///
 /// Examples:
 /// ---
@@ -115,7 +123,10 @@ struct ReadGuard(T, Lock) {
 	/// Monitor!int m;
 	/// assert(read(m).value == 0);
 	/// ---
-	ref const(T) value() return { return monitor.value; }
+	ref const(T) value() return {
+		assert(monitor !is null, "bc.monitor: reading through a guard that holds nothing");
+		return monitor.value;
+	}
 
 	alias value this;
 
@@ -129,7 +140,9 @@ struct ReadGuard(T, Lock) {
 	bool opCast(B : bool)() const { return monitor !is null; }
 }
 
-/// The exclusive hold on a monitor, released when the guard is destroyed, giving mutable access to its value. An empty guard, from a failed `tryWrite`, holds nothing and converts to `false`. The `ref` that `value` returns must not outlive the guard, and a temporary guard, as in `write(m).value = 1`, holds until the end of the whole expression.
+/// The exclusive hold on a monitor, released when the guard is destroyed, giving mutable access to its value.
+/// An empty guard, from a failed `tryWrite`, holds nothing and converts to `false`.
+/// The `ref` that `value` returns must not outlive the guard, and a temporary guard, as in `write(m).value = 1`, holds until the end of the whole expression.
 ///
 /// Examples:
 /// ---
@@ -155,7 +168,10 @@ struct WriteGuard(T, Lock) {
 	/// write(m).value = 2;
 	/// assert(read(m).value == 2);
 	/// ---
-	ref T value() return { return monitor.value; }
+	ref T value() return {
+		assert(monitor !is null, "bc.monitor: writing through a guard that holds nothing");
+		return monitor.value;
+	}
 
 	alias value this;
 
@@ -172,7 +188,8 @@ struct WriteGuard(T, Lock) {
 
 // --- creation ----------------------------------------------------------------
 
-/// Allocates a monitor holding `value`, which is moved in, under a lock from `Lock`'s `create`, or `Lock.init` if it has none. Free it with `fp.pointer.free`, which ends the value's lifetime and frees the lock through `Monitor.finalize`, once no thread holds it.
+/// Allocates a monitor holding `value`, which is moved in, under a lock from `Lock`'s `create`, or `Lock.init` if it has none.
+/// Free it with `fp.pointer.free`, which ends the value's lifetime and frees the lock through `Monitor.finalize`, once no thread holds it.
 ///
 /// Returns null, having freed what it allocated and leaving `value` as it was, if allocation is refused or `Lock` is a pointer and its `create` returns null.
 ///
@@ -198,6 +215,7 @@ Monitor!(T, Lock)* create(Lock = bc.spinlock.SpinLock, T)(T value) @trusted if(i
 		return null;
 	}
 	fp.lifecycle.moveInto(m.value, value);
+	static if(__traits(compiles, lockScope!Lock.isLocked(m.lock))) assert(!lockScope!Lock.isLocked(m.lock), "bc.monitor.create: a new monitor that is already held");
 	return m;
 }
 
@@ -213,10 +231,12 @@ Monitor!(T, Lock)* create(Lock = bc.spinlock.SpinLock, T)(T value) @trusted if(i
 /// ---
 ReadGuard!(T, Lock) read(T, Lock)(return ref Monitor!(T, Lock) m) @trusted {
 	lockScope!Lock.lockForReading(m.lock);
+	static if(__traits(compiles, lockScope!Lock.isLockedForReading(m.lock))) assert(lockScope!Lock.isLockedForReading(m.lock), "bc.monitor.read: a read guard without a read hold");
 	return ReadGuard!(T, Lock)(&m);
 }
 
-/// Takes a shared hold on `m` without waiting; returns an empty guard, taking nothing, if a writer holds it. Defined only for a lock whose scope has `tryLockForReading`.
+/// Takes a shared hold on `m` without waiting; returns an empty guard, taking nothing, if a writer holds it.
+/// Defined only for a lock whose scope has `tryLockForReading`.
 ///
 /// Examples:
 /// ---
@@ -226,6 +246,7 @@ ReadGuard!(T, Lock) read(T, Lock)(return ref Monitor!(T, Lock) m) @trusted {
 /// ---
 ReadGuard!(T, Lock) tryRead(T, Lock)(return ref Monitor!(T, Lock) m) @trusted if(hasTryLocks!Lock) {
 	if(!lockScope!Lock.tryLockForReading(m.lock)) return ReadGuard!(T, Lock).init;
+	static if(__traits(compiles, lockScope!Lock.isLockedForReading(m.lock))) assert(lockScope!Lock.isLockedForReading(m.lock), "bc.monitor.tryRead: a read guard without a read hold");
 	return ReadGuard!(T, Lock)(&m);
 }
 
@@ -241,10 +262,12 @@ ReadGuard!(T, Lock) tryRead(T, Lock)(return ref Monitor!(T, Lock) m) @trusted if
 /// ---
 WriteGuard!(T, Lock) write(T, Lock)(return ref Monitor!(T, Lock) m) @trusted {
 	lockScope!Lock.lockForWriting(m.lock);
+	static if(__traits(compiles, lockScope!Lock.isLockedForWriting(m.lock))) assert(lockScope!Lock.isLockedForWriting(m.lock), "bc.monitor.write: a write guard without a write hold");
 	return WriteGuard!(T, Lock)(&m);
 }
 
-/// Takes the exclusive hold on `m` without waiting; returns an empty guard, taking nothing, if anyone holds it. Defined only for a lock whose scope has `tryLockForWriting`.
+/// Takes the exclusive hold on `m` without waiting; returns an empty guard, taking nothing, if anyone holds it.
+/// Defined only for a lock whose scope has `tryLockForWriting`.
 ///
 /// Examples:
 /// ---
@@ -254,6 +277,7 @@ WriteGuard!(T, Lock) write(T, Lock)(return ref Monitor!(T, Lock) m) @trusted {
 /// ---
 WriteGuard!(T, Lock) tryWrite(T, Lock)(return ref Monitor!(T, Lock) m) @trusted if(hasTryLocks!Lock) {
 	if(!lockScope!Lock.tryLockForWriting(m.lock)) return WriteGuard!(T, Lock).init;
+	static if(__traits(compiles, lockScope!Lock.isLockedForWriting(m.lock))) assert(lockScope!Lock.isLockedForWriting(m.lock), "bc.monitor.tryWrite: a write guard without a write hold");
 	return WriteGuard!(T, Lock)(&m);
 }
 

@@ -30,19 +30,24 @@ enum size_t dynamicExtent = size_t.max;
 
 // Takes `buffer[head]` and advances `head`, shifting the rest down only once at least half is consumed, so each take costs amortized O(1).
 private T takeFront(T)(ref T* buffer, ref size_t head) @trusted {
+	assert(head < fp.dynarray.length(buffer), "bc.channel: taking from an empty buffer");
+	immutable remaining = fp.dynarray.length(buffer) - head - 1;
 	T value = buffer[head];
 	buffer[head++] = T.init;
 	if(head * 2 >= fp.dynarray.length(buffer)) {
 		cast(void) fp.dynarray.removeRange(buffer, 0, head);
 		head = 0;
 	}
+	assert(fp.dynarray.length(buffer) - head == remaining, "bc.channel: taking one value lost others");
 	return value;
 }
 
 
 static if(bc.platform.threadingSupported) {
 
-	/// A channel of `T` values, used through the pointer `create` returns. Its fields belong to the implementation. `T` must satisfy `isChannelable`.
+	/// A channel of `T` values, used through the pointer `create` returns.
+	/// Its fields belong to the implementation.
+	/// `T` must satisfy `isChannelable`.
 	///
 	/// Examples:
 	/// ---
@@ -63,7 +68,8 @@ static if(bc.platform.threadingSupported) {
 
 		shared bool closed = false;
 
-		// Threads blocked, or about to block, on each semaphore, guarded by `lock`. Whoever posts takes one off, so no post outlives its waiter.
+		// Threads blocked, or about to block, on each semaphore, guarded by `lock`.
+		// Whoever posts takes one off, so no post outlives its waiter.
 		size_t sendersWaiting = 0;
 		size_t receiversWaiting = 0;
 
@@ -73,6 +79,8 @@ static if(bc.platform.threadingSupported) {
 
 
 	private void freeParts(T)(Channel!T* channel) @trusted {
+		assert(core.atomic.atomicLoad(channel.users) == 0, "bc.channel: destroying a channel a thread is still inside");
+		assert(channel.sendersWaiting == 0 && channel.receiversWaiting == 0, "bc.channel: destroying a channel with threads waiting on it");
 		bc.semaphore.free(channel.itemAvailable);
 		bc.semaphore.free(channel.spaceAvailable);
 		bc.mutex.free(channel.lock);
@@ -104,6 +112,8 @@ static if(bc.platform.threadingSupported) {
 	size_t length(T)(Channel!T* channel) @trusted {
 		bc.mutex.lockForWriting(channel.lock);
 		immutable n = channel.count;
+		assert(channel.capacity == dynamicExtent || n <= channel.capacity, "bc.channel: more values than the capacity");
+		assert(channel.capacity != dynamicExtent || n == fp.dynarray.length(channel.buffer) - channel.head, "bc.channel: a count that disagrees with the buffer");
 		bc.mutex.unlockForWriting(channel.lock);
 		return n;
 	}
@@ -121,7 +131,8 @@ static if(bc.platform.threadingSupported) {
 	bool isClosed(T)(const Channel!T* channel) @trusted { return core.atomic.atomicLoad(channel.closed); }
 
 
-	/// Creates an open, empty channel holding up to `capacity` values, which must be above zero, or any number of them with `dynamicExtent`. Several `bc` modules define `create`, so call it fully qualified, as `bc.channel.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
+	/// Creates an open, empty channel holding up to `capacity` values, which must be above zero, or any number of them with `dynamicExtent`.
+	/// Several `bc` modules define `create`, so call it fully qualified, as `bc.channel.create`, the preferred style throughout these libraries; after `import bc;` an unqualified call is ambiguous.
 	///
 	/// Returns null, having freed what it allocated, if allocation or creating its semaphores or lock fails.
 	///
@@ -133,7 +144,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(channel);
 	/// ---
 	Channel!T* create(T)(size_t capacity) @trusted {
-		assert(capacity > 0);
+		assert(capacity > 0, "bc.channel.create: a channel that can hold nothing");
 		auto channel = fp.pointer.allocate!(Channel!T)(1);
 		if(channel is null) return null;
 		*channel = Channel!T.init;
@@ -152,11 +163,14 @@ static if(bc.platform.threadingSupported) {
 			freeParts(channel);
 			return null;
 		}
+		assert(!bounded || fp.dynarray.length(channel.buffer) == capacity, "bc.channel.create: a ring of the wrong size");
+		assert(channel.count == 0 && channel.head == 0 && !channel.closed, "bc.channel.create: a new channel that is not empty and open");
 		return channel;
 	}
 
 
-	/// Appends `value` to `channel`, first waiting for room if `channel` is full. Without threads, `channel` never fills, so `send` never waits.
+	/// Appends `value` to `channel`, first waiting for room if `channel` is full.
+	/// Without threads, `channel` never fills, so `send` never waits.
 	///
 	/// Returns false, leaving `channel` unchanged, if `channel` is closed before `value` fits, or if `channel` is unbounded and its buffer cannot grow.
 	///
@@ -169,6 +183,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(channel);
 	/// ---
 	bool send(T)(Channel!T* channel, T value) @trusted {
+		assert(channel !is null, "bc.channel.send: no channel");
 		immutable dynamic = channel.capacity == dynamicExtent;
 		core.atomic.atomicOp!"+="(channel.users, 1);
 		bool sent = false;
@@ -185,6 +200,8 @@ static if(bc.platform.threadingSupported) {
 				}
 				if(!dynamic) channel.buffer[(channel.head + channel.count) % channel.capacity] = value;
 				channel.count++;
+				assert(dynamic || channel.count <= channel.capacity, "bc.channel.send: overfilled the ring");
+				assert(!dynamic || channel.count == fp.dynarray.length(channel.buffer) - channel.head, "bc.channel.send: a count that disagrees with the buffer");
 				immutable wake = channel.receiversWaiting > 0;
 				if(wake) channel.receiversWaiting--;
 				bc.mutex.unlockForWriting(channel.lock);
@@ -192,17 +209,20 @@ static if(bc.platform.threadingSupported) {
 				sent = true;
 				break;
 			}
+			assert(!dynamic, "bc.channel.send: waiting for room in a channel that never fills");
 			channel.sendersWaiting++;
 			bc.mutex.unlockForWriting(channel.lock);
 			bc.semaphore.wait(channel.spaceAvailable);
 		}
+		assert(core.atomic.atomicLoad(channel.users) > 0, "bc.channel.send: left a channel more often than entered");
 		core.atomic.atomicOp!"-="(channel.users, 1);
 		return sent;
 	}
 
 	/// Removes and returns the oldest value in `channel`, first waiting for one if `channel` is empty.
 	///
-	/// Returns an empty `Nullable` once `channel` is closed and empty. Without threads an empty `channel` returns an empty `Nullable` at once, since nothing could fill it while `receive` waited.
+	/// Returns an empty `Nullable` once `channel` is closed and empty.
+	/// Without threads an empty `channel` returns an empty `Nullable` at once, since nothing could fill it while `receive` waited.
 	///
 	/// Examples:
 	/// ---
@@ -214,6 +234,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(channel);
 	/// ---
 	std.typecons.Nullable!T receive(T)(Channel!T* channel) @trusted {
+		assert(channel !is null, "bc.channel.receive: no channel");
 		immutable dynamic = channel.capacity == dynamicExtent;
 		core.atomic.atomicOp!"+="(channel.users, 1);
 		std.typecons.Nullable!T value = std.typecons.Nullable!T.init;
@@ -228,7 +249,9 @@ static if(bc.platform.threadingSupported) {
 					channel.buffer[channel.head] = T.init;
 					channel.head = (channel.head + 1) % channel.capacity;
 				}
+				assert(channel.count > 0, "bc.channel.receive: took from an empty channel");
 				channel.count--;
+				assert(dynamic || channel.head < channel.capacity, "bc.channel.receive: a head past the ring");
 				immutable wake = channel.sendersWaiting > 0;
 				if(wake) channel.sendersWaiting--;
 				bc.mutex.unlockForWriting(channel.lock);
@@ -241,12 +264,14 @@ static if(bc.platform.threadingSupported) {
 			bc.mutex.unlockForWriting(channel.lock);
 			bc.semaphore.wait(channel.itemAvailable);
 		}
+		assert(core.atomic.atomicLoad(channel.users) > 0, "bc.channel.receive: left a channel more often than entered");
 		core.atomic.atomicOp!"-="(channel.users, 1);
 		return value;
 	}
 
 
-	/// Closes `channel`: later sends fail, and threads waiting in `send` or `receive` on it wake. Values already in `channel` can still be received.
+	/// Closes `channel`: later sends fail, and threads waiting in `send` or `receive` on it wake.
+	/// Values already in `channel` can still be received.
 	///
 	/// Examples:
 	/// ---
@@ -262,11 +287,15 @@ static if(bc.platform.threadingSupported) {
 		immutable receivers = channel.receiversWaiting;
 		channel.sendersWaiting = channel.receiversWaiting = 0;
 		bc.mutex.unlockForWriting(channel.lock);
+		assert(senders == 0 || channel.spaceAvailable !is null, "bc.channel.close: senders waiting on a channel that never fills");
 		foreach(_; 0 .. senders) bc.semaphore.post(channel.spaceAvailable);
 		foreach(_; 0 .. receivers) bc.semaphore.post(channel.itemAvailable);
+		assert(core.atomic.atomicLoad(channel.closed), "bc.channel.close: the channel reopened");
 	}
 
-	/// Closes and frees `channel`; does nothing if `channel` is null. Threads blocked in `send` or `receive` are woken and waited for before anything is destroyed, so freeing a channel others are blocked on is safe, though starting a new `send` or `receive` on it after is not. Freeing `channel` twice is undefined.
+	/// Closes and frees `channel`; does nothing if `channel` is null.
+	/// Threads blocked in `send` or `receive` are woken and waited for before anything is destroyed, so freeing a channel others are blocked on is safe, though starting a new `send` or `receive` on it after is not.
+	/// Freeing `channel` twice is undefined.
 	///
 	/// Examples:
 	/// ---
@@ -279,6 +308,7 @@ static if(bc.platform.threadingSupported) {
 		close(channel);
 		// A woken waiter still reads the channel, so it must leave before any part of it is destroyed.
 		while(core.atomic.atomicLoad(channel.users) > 0) core.atomic.pause();
+		assert(core.atomic.atomicLoad(channel.users) == 0, "bc.channel.free: a thread entered a closed channel's call after its users drained");
 		freeParts(channel);
 	}
 
@@ -287,7 +317,9 @@ static if(bc.platform.threadingSupported) {
 
 // --- channels within one thread ------------------------------------------------
 
-/// A channel of `T` values that one thread, or coroutines taking turns on one thread, send through: an unbounded queue with the channel's operations, whose `receive` never waits. Without threads it is `Channel`, since nothing could fill an empty channel or drain a full one while a call waited. Used through the pointer `createLocal` returns; its fields belong to the implementation.
+/// A channel of `T` values that one thread, or coroutines taking turns on one thread, send through: an unbounded queue with the channel's operations, whose `receive` never waits.
+/// Without threads it is `Channel`, since nothing could fill an empty channel or drain a full one while a call waited.
+/// Used through the pointer `createLocal` returns; its fields belong to the implementation.
 ///
 /// Examples:
 /// ---
@@ -322,7 +354,10 @@ size_t capacity(T)(const LocalChannel!T* channel) { return channel.capacity; }
 /// assert(send(channel, 1) && length(channel) == 1);
 /// free(channel);
 /// ---
-size_t length(T)(const LocalChannel!T* channel) @trusted { return fp.dynarray.length(channel.buffer) - channel.head; }
+size_t length(T)(const LocalChannel!T* channel) @trusted {
+	assert(channel.head <= fp.dynarray.length(channel.buffer), "bc.channel: a head past the buffer");
+	return fp.dynarray.length(channel.buffer) - channel.head;
+}
 
 // wrapper: reads a field of an opaque channel
 /// Whether `close` has been called on `channel`.
@@ -336,7 +371,8 @@ size_t length(T)(const LocalChannel!T* channel) @trusted { return fp.dynarray.le
 /// ---
 bool isClosed(T)(const LocalChannel!T* channel) { return channel.closed; }
 
-/// Creates an open, empty local channel, reserving room for `capacity` values unless it is `dynamicExtent`, the default. Returns null if allocation fails.
+/// Creates an open, empty local channel, reserving room for `capacity` values unless it is `dynamicExtent`, the default.
+/// Returns null if allocation fails.
 ///
 /// Examples:
 /// ---
@@ -345,7 +381,7 @@ bool isClosed(T)(const LocalChannel!T* channel) { return channel.closed; }
 /// free(channel);
 /// ---
 LocalChannel!T* createLocal(T)(size_t capacity = dynamicExtent) @trusted {
-	assert(capacity > 0);
+	assert(capacity > 0, "bc.channel.createLocal: a channel that can hold nothing");
 	auto channel = fp.pointer.allocate!(LocalChannel!T)(1);
 	if(channel is null) return null;
 	*channel = LocalChannel!T.init;
@@ -354,10 +390,12 @@ LocalChannel!T* createLocal(T)(size_t capacity = dynamicExtent) @trusted {
 		fp.pointer.free(channel);
 		return null;
 	}
+	assert(length(channel) == 0 && !channel.closed, "bc.channel.createLocal: a new channel that is not empty and open");
 	return channel;
 }
 
-/// Adds `value` to `channel`. Returns false if `channel` is closed or could not grow, leaving it as it was.
+/// Adds `value` to `channel`.
+/// Returns false if `channel` is closed or could not grow, leaving it as it was.
 ///
 /// Examples:
 /// ---
@@ -366,11 +404,16 @@ LocalChannel!T* createLocal(T)(size_t capacity = dynamicExtent) @trusted {
 /// free(channel);
 /// ---
 bool send(T)(LocalChannel!T* channel, T value) @trusted {
+	assert(channel !is null, "bc.channel.send: no channel");
 	if(channel.closed) return false;
-	return fp.dynarray.pushBack(channel.buffer, value);
+	immutable before = length(channel);
+	immutable sent = fp.dynarray.pushBack(channel.buffer, value);
+	assert(length(channel) == before + sent, "bc.channel.send: a send that did not add exactly one value");
+	return sent;
 }
 
-/// Removes and returns the oldest value in `channel`, or an empty `Nullable` if it holds none; it never waits. Each costs amortized O(1).
+/// Removes and returns the oldest value in `channel`, or an empty `Nullable` if it holds none; it never waits.
+/// Each costs amortized O(1).
 ///
 /// Examples:
 /// ---
@@ -380,8 +423,12 @@ bool send(T)(LocalChannel!T* channel, T value) @trusted {
 /// free(channel);
 /// ---
 std.typecons.Nullable!T receive(T)(LocalChannel!T* channel) @trusted {
-	if(length(channel) == 0) return std.typecons.Nullable!T.init;
-	return std.typecons.nullable(takeFront(channel.buffer, channel.head));
+	assert(channel !is null, "bc.channel.receive: no channel");
+	immutable before = length(channel);
+	if(before == 0) return std.typecons.Nullable!T.init;
+	auto value = std.typecons.nullable(takeFront(channel.buffer, channel.head));
+	assert(length(channel) == before - 1, "bc.channel.receive: a receive that did not take exactly one value");
+	return value;
 }
 
 /// Closes `channel`: later sends fail, though values already in it can still be received.
@@ -393,7 +440,10 @@ std.typecons.Nullable!T receive(T)(LocalChannel!T* channel) @trusted {
 /// assert(!send(channel, 1));
 /// free(channel);
 /// ---
-void close(T)(LocalChannel!T* channel) { channel.closed = true; }
+void close(T)(LocalChannel!T* channel) {
+	assert(channel !is null, "bc.channel.close: no channel");
+	channel.closed = true;
+}
 
 /// Frees `channel` and the values it holds; does nothing if `channel` is null.
 ///
@@ -405,6 +455,7 @@ void close(T)(LocalChannel!T* channel) { channel.closed = true; }
 /// ---
 void free(T)(LocalChannel!T* channel) @trusted {
 	if(channel is null) return;
+	assert(channel.head <= fp.dynarray.length(channel.buffer), "bc.channel.free: a head past the buffer");
 	fp.dynarray.free(channel.buffer);
 	fp.pointer.free(channel);
 }

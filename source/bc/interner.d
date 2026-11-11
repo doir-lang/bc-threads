@@ -1,6 +1,8 @@
 /// Interning tables any thread may use at once: an `Interner!T` gives each distinct sequence of `T` a dense id, from 0, and gives back the sequence for an id without taking a lock, so the jobs of a pool can intern names side by side.
 ///
-/// Each copy is followed by a `T.init`, so an interned `char` sequence is a C string too. The table is split into shards by hash, each behind a `bc.spinlock`, so interning on different shards never waits. Sequences are copied into chunks a shard never moves, and ids find them through pages that are never moved either, so a lookup by id reads without locking: an id reaches another thread only after the interning that made it has released its shard.
+/// Each copy is followed by a `T.init`, so an interned `char` sequence is a C string too.
+/// The table is split into shards by hash, each behind a `bc.spinlock`, so interning on different shards never waits.
+/// Sequences are copied into chunks a shard never moves, and ids find them through pages that are never moved either, so a lookup by id reads without locking: an id reaches another thread only after the interning that made it has released its shard.
 ///
 /// Examples:
 /// ---
@@ -70,7 +72,8 @@ private struct Shard(T) {
 	size_t used; // items used in the last chunk
 }
 
-/// A table interning sequences of `T`, which must be plain bytes, handing out ids of type `Id`: a `uint`, or a struct whose one field is a `uint`, so a caller's ids cannot be confused with other numbers. Its `.init` is empty and ready; release it with `free`, from one thread, once no other uses it.
+/// A table interning sequences of `T`, which must be plain bytes, handing out ids of type `Id`: a `uint`, or a struct whose one field is a `uint`, so a caller's ids cannot be confused with other numbers.
+/// Its `.init` is empty and ready; release it with `free`, from one thread, once no other uses it.
 ///
 /// Examples:
 /// ---
@@ -112,15 +115,19 @@ private uint rawOf(Id)(Id id) {
 // --- table entries -----------------------------------------------------------
 
 private const(ubyte)[] bytesOf(T)(const(T)[] items) @trusted {
+	assert(items.ptr !is null || items.length == 0, "bc.interner: items with a length but no address");
+	assert(items.length <= size_t.max / T.sizeof, "bc.interner: more items than memory holds");
 	return (cast(const(ubyte)*) items.ptr)[0 .. items.length * T.sizeof];
 }
 
 private size_t hashEntry(T)(inout(ubyte)[] bytes) @trusted {
+	assert(bytes.length == Entry!T.sizeof, "bc.interner: hashing an entry of the wrong size");
 	auto e = cast(const(Entry!T)*) bytes.ptr;
 	return cast(size_t) fp.algorithms.hashBytes(bytesOf(e.items[0 .. e.length]));
 }
 
 private bool equalEntry(T)(inout(ubyte)[] a, inout(ubyte)[] b) @trusted {
+	assert(a.length == Entry!T.sizeof && b.length == Entry!T.sizeof, "bc.interner: comparing entries of the wrong size");
 	auto x = cast(const(Entry!T)*) a.ptr, y = cast(const(Entry!T)*) b.ptr;
 	return x.length == y.length && core.stdc.string.memcmp(x.items, y.items, x.length * T.sizeof) == 0;
 }
@@ -140,7 +147,8 @@ size_t count(T, Id)(ref const Interner!(T, Id) interner) @trusted {
 	return core.atomic.atomicLoad((cast(Interner!(T, Id)*) &interner).next);
 }
 
-/// The sequence interned as `id`, which must have come from `intern` on `interner`. It takes no lock.
+/// The sequence interned as `id`, which must have come from `intern` on `interner`.
+/// It takes no lock.
 ///
 /// Examples:
 /// ---
@@ -152,11 +160,14 @@ size_t count(T, Id)(ref const Interner!(T, Id) interner) @trusted {
 const(T)[] items(T, Id)(ref const Interner!(T, Id) interner, Id id) @trusted {
 	immutable raw = rawOf(id);
 	assert(raw < count(interner), "bc.interner: no such id");
+	assert(interner.pages[raw >> pageBits] !is null, "bc.interner: an id on a page never allocated");
 	return interner.pages[raw >> pageBits][raw & pageMask];
 }
 
 // The shard `hash` selects, from its top bits: a shard's table indexes by its low ones, which a shard chosen from them would cluster.
 private Shard!T* shardOf(T, Id)(ref Interner!(T, Id) interner, ulong hash) {
+	assert(interner.shards !is null, "bc.interner: a shard of an interner with none");
+	assert((hash >> (64 - shardBits)) < shardCount, "bc.interner: a shard past the interner's");
 	return &interner.shards[hash >> (64 - shardBits)];
 }
 
@@ -174,14 +185,17 @@ Id find(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @trusted {
 	bc.spinlock.lockForReading(shard.lock);
 	scope(exit) bc.spinlock.unlockForReading(shard.lock);
 	if(shard.table is null) return toId!Id(notInterned);
+	assert(items.length <= uint.max, "bc.interner.find: a sequence longer than an entry counts");
 	auto found = fp.hashtable.find(shard.table, Entry!T(items.ptr, cast(uint) items.length, notInterned));
+	assert(found is null || found.id < count(interner), "bc.interner.find: an entry with an id never taken");
 	return toId!Id(found is null ? notInterned : found.id);
 }
 
 
 // --- creation and freeing ----------------------------------------------------
 
-// Allocates the shards and the directory if no thread has yet. False on refusal.
+// Allocates the shards and the directory if no thread has yet.
+// False on refusal.
 private bool ready(T, Id)(ref Interner!(T, Id) interner) @trusted {
 	if(core.atomic.atomicLoad(bc.platform.asShared(interner.shards)) !is null) return true;
 	bc.spinlock.lockForWriting(interner.setup);
@@ -199,10 +213,12 @@ private bool ready(T, Id)(ref Interner!(T, Id) interner) @trusted {
 	interner.pages = directory;
 	// Published last: a thread that sees the shards sees the directory too.
 	core.atomic.atomicStore(bc.platform.asShared(interner.shards), cast(shared(Shard!T*)) shards);
+	assert(interner.pages !is null && interner.shards !is null, "bc.interner: ready without its shards or directory");
 	return true;
 }
 
-// Takes the next id, first allocating the page that holds it if no thread has yet. `refused` on refusal, taking no id.
+// Takes the next id, first allocating the page that holds it if no thread has yet.
+// `refused` on refusal, taking no id.
 private uint takeId(T, Id)(ref Interner!(T, Id) interner) @trusted {
 	for(;;) {
 		immutable id = core.atomic.atomicLoad(interner.next);
@@ -222,12 +238,14 @@ private uint takeId(T, Id)(ref Interner!(T, Id) interner) @trusted {
 			}
 			bc.spinlock.unlockForWriting(interner.setup);
 		}
+		assert(interner.pages[id >> pageBits] !is null, "bc.interner: an id taken on a page never allocated");
 		if(core.atomic.cas(&interner.next, id, id + 1)) return id;
 	}
 }
 
 // `intern`, giving the id as a plain number.
 private uint internRaw(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @trusted {
+	assert(items.length < uint.max, "bc.interner.intern: a sequence longer than an entry counts");
 	if(!ready(interner)) return refused;
 	immutable hash = fp.algorithms.hashBytes(bytesOf(items));
 	auto shard = shardOf(interner, hash);
@@ -264,6 +282,7 @@ private uint internRaw(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @
 		shard.used = 0;
 	}
 	auto copy = shard.chunks[fp.dynarray.length(shard.chunks) - 1] + shard.used;
+	assert(shard.used + items.length + 1 <= fp.pointer.length(shard.chunks[fp.dynarray.length(shard.chunks) - 1]), "bc.interner.intern: a copy past its chunk");
 	if(items.length) core.stdc.string.memcpy(copy, items.ptr, items.length * T.sizeof);
 	copy[items.length] = T.init;
 	// One lookup finds the sequence or places it: a placed entry still has no id.
@@ -278,11 +297,14 @@ private uint internRaw(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @
 	stored.id = id;
 	shard.used += items.length + 1;
 	interner.pages[id >> pageBits][id & pageMask] = copy[0 .. items.length];
+	assert(id < count(interner) && id < maxIds, "bc.interner.intern: an id past those taken");
+	assert(interner.pages[id >> pageBits][id & pageMask] == items, "bc.interner.intern: the id names other items");
 	return id;
 }
 
 // wrapper: converts the plain id internRaw gives on every path to Id once
-/// The id of `items`, interning a copy of them if they are new. Any thread may call it at once with any other.
+/// The id of `items`, interning a copy of them if they are new.
+/// Any thread may call it at once with any other.
 ///
 /// Returns `refused` if an allocation is refused, having taken no id and left every interned sequence as it was.
 ///
@@ -296,7 +318,8 @@ Id intern(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @trusted {
 	return toId!Id(internRaw(interner, items));
 }
 
-/// Releases everything `interner` holds, leaving it empty and reusable. No other thread may be using it.
+/// Releases everything `interner` holds, leaving it empty and reusable.
+/// No other thread may be using it.
 ///
 /// Examples:
 /// ---
