@@ -59,15 +59,21 @@ template isId(Id) {
 	else enum bool isId = is(Id == uint);
 }
 
-private struct Entry(T) {
-	const(T)* items;
-	uint length;
+// A shard's slot: an id with the low bits of its items' hash, so a probe rejects most others, and growing rehashes nothing, without reading the items.
+private struct Slot {
 	uint id;
+	uint hash;
+}
+
+// A sequence of items with the low bits of its hash: what a shard's table is looked up by.
+private struct Probe(T) {
+	const(T)[] items;
+	uint hash;
 }
 
 private struct Shard(T) {
 	bc.spinlock.SpinLock lock;
-	Entry!T* table;
+	Slot* table; // the ids interned on this shard, an `fp.hashtable` looked up by their items through `Ids`
 	T** chunks; // where this shard's sequences live; each is a block of `chunkBytes`, or one sequence larger than that
 	size_t used; // items used in the last chunk
 }
@@ -120,18 +126,6 @@ private const(ubyte)[] bytesOf(T)(const(T)[] items) @trusted {
 	return (cast(const(ubyte)*) items.ptr)[0 .. items.length * T.sizeof];
 }
 
-private size_t hashEntry(T)(inout(ubyte)[] bytes) @trusted {
-	assert(bytes.length == Entry!T.sizeof, "bc.interner: hashing an entry of the wrong size");
-	auto e = cast(const(Entry!T)*) bytes.ptr;
-	return cast(size_t) fp.algorithms.hashBytes(bytesOf(e.items[0 .. e.length]));
-}
-
-private bool equalEntry(T)(inout(ubyte)[] a, inout(ubyte)[] b) @trusted {
-	assert(a.length == Entry!T.sizeof && b.length == Entry!T.sizeof, "bc.interner: comparing entries of the wrong size");
-	auto x = cast(const(Entry!T)*) a.ptr, y = cast(const(Entry!T)*) b.ptr;
-	return x.length == y.length && core.stdc.string.memcmp(x.items, y.items, x.length * T.sizeof) == 0;
-}
-
 
 // --- queries -----------------------------------------------------------------
 
@@ -164,6 +158,19 @@ const(T)[] items(T, Id)(ref const Interner!(T, Id) interner, Id id) @trusted {
 	return interner.pages[raw >> pageBits][raw & pageMask];
 }
 
+// The `fp.hashtable` view of a shard's slots, each standing for the items its id names.
+// A slot holding `notInterned` stands for `pending`: the copy an `intern` is placing before it takes the id.
+private struct Ids(T, Id) {
+	alias Slot = .Slot;
+	alias Key = Probe!T;
+	const(Interner!(T, Id))* interner;
+	const(T)[] pending;
+
+	Probe!T keyOf(ref const Slot slot) const { return Probe!T(slot.id == notInterned ? pending : items(*interner, toId!Id(slot.id)), slot.hash); }
+	size_t hash(ref const Probe!T key) const { return key.hash; }
+	bool equal(ref const Probe!T a, ref const Probe!T b) const { return a.hash == b.hash && bytesOf(a.items) == bytesOf(b.items); }
+}
+
 // The shard `hash` selects, from its top bits: a shard's table indexes by its low ones, which a shard chosen from them would cluster.
 private Shard!T* shardOf(T, Id)(ref Interner!(T, Id) interner, ulong hash) {
 	assert(interner.shards !is null, "bc.interner: a shard of an interner with none");
@@ -181,12 +188,13 @@ private Shard!T* shardOf(T, Id)(ref Interner!(T, Id) interner, ulong hash) {
 /// ---
 Id find(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @trusted {
 	if(core.atomic.atomicLoad(bc.platform.asShared(interner.shards)) is null) return toId!Id(notInterned);
-	auto shard = shardOf(interner, fp.algorithms.hashBytes(bytesOf(items)));
+	immutable hash = fp.algorithms.hashBytes(bytesOf(items));
+	auto shard = shardOf(interner, hash);
 	bc.spinlock.lockForReading(shard.lock);
 	scope(exit) bc.spinlock.unlockForReading(shard.lock);
 	if(shard.table is null) return toId!Id(notInterned);
 	assert(items.length <= uint.max, "bc.interner.find: a sequence longer than an entry counts");
-	auto found = fp.hashtable.find(shard.table, Entry!T(items.ptr, cast(uint) items.length, notInterned));
+	auto found = fp.hashtable.find(Ids!(T, Id)(&interner), shard.table, Probe!T(items, cast(uint) hash));
 	assert(found is null || found.id < count(interner), "bc.interner.find: an entry with an id never taken");
 	return toId!Id(found is null ? notInterned : found.id);
 }
@@ -252,7 +260,7 @@ private uint internRaw(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @
 	// Most interning finds what another thread interned, which readers do side by side.
 	bc.spinlock.lockForReading(shard.lock);
 	if(shard.table !is null)
-		if(auto found = fp.hashtable.find(shard.table, Entry!T(items.ptr, cast(uint) items.length, notInterned))) {
+		if(auto found = fp.hashtable.find(Ids!(T, Id)(&interner), shard.table, Probe!T(items, cast(uint) hash))) {
 			immutable id = found.id;
 			bc.spinlock.unlockForReading(shard.lock);
 			return id;
@@ -261,10 +269,7 @@ private uint internRaw(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @
 	bc.spinlock.lockForWriting(shard.lock);
 	scope(exit) bc.spinlock.unlockForWriting(shard.lock);
 	if(shard.table is null) {
-		fp.hashtable.Config config;
-		config.hashFunction = &hashEntry!T;
-		config.equalFunction = &equalEntry!T;
-		shard.table = fp.hashtable.create!(Entry!T)(config);
+		shard.table = fp.hashtable.create!Slot();
 		if(shard.table is null) return refused;
 	}
 
@@ -285,18 +290,20 @@ private uint internRaw(T, Id)(ref Interner!(T, Id) interner, const(T)[] items) @
 	assert(shard.used + items.length + 1 <= fp.pointer.length(shard.chunks[fp.dynarray.length(shard.chunks) - 1]), "bc.interner.intern: a copy past its chunk");
 	if(items.length) core.stdc.string.memcpy(copy, items.ptr, items.length * T.sizeof);
 	copy[items.length] = T.init;
-	// One lookup finds the sequence or places it: a placed entry still has no id.
-	auto stored = fp.hashtable.insert(shard.table, Entry!T(copy, cast(uint) items.length, notInterned));
+	// One lookup finds the sequence or places it: a placed slot is `notInterned`, standing for the copy, until the id is taken.
+	auto view = Ids!(T, Id)(&interner, copy[0 .. items.length]);
+	auto stored = fp.hashtable.insert(view, shard.table, Slot(notInterned, cast(uint) hash));
 	if(stored is null) return refused;
 	if(stored.id != notInterned) return stored.id;
 	immutable id = takeId(interner);
 	if(id == refused) {
-		fp.hashtable.remove(shard.table, *stored);
+		fp.hashtable.remove(view, shard.table, Probe!T(view.pending, cast(uint) hash));
 		return refused;
 	}
+	// The page is written first, since the view resolves a stored id through it.
+	interner.pages[id >> pageBits][id & pageMask] = copy[0 .. items.length];
 	stored.id = id;
 	shard.used += items.length + 1;
-	interner.pages[id >> pageBits][id & pageMask] = copy[0 .. items.length];
 	assert(id < count(interner) && id < maxIds, "bc.interner.intern: an id past those taken");
 	assert(interner.pages[id >> pageBits][id & pageMask] == items, "bc.interner.intern: the id names other items");
 	return id;

@@ -28,20 +28,6 @@ enum bool isChannelable(T) = !std.traits.hasElaborateAssign!T && !std.traits.has
 /// Passed to `create` as the capacity, makes the channel unbounded, so `send` never waits.
 enum size_t dynamicExtent = size_t.max;
 
-// Takes `buffer[head]` and advances `head`, shifting the rest down only once at least half is consumed, so each take costs amortized O(1).
-private T takeFront(T)(ref T* buffer, ref size_t head) @trusted {
-	assert(head < fp.dynarray.length(buffer), "bc.channel: taking from an empty buffer");
-	immutable remaining = fp.dynarray.length(buffer) - head - 1;
-	T value = buffer[head];
-	buffer[head++] = T.init;
-	if(head * 2 >= fp.dynarray.length(buffer)) {
-		cast(void) fp.dynarray.removeRange(buffer, 0, head);
-		head = 0;
-	}
-	assert(fp.dynarray.length(buffer) - head == remaining, "bc.channel: taking one value lost others");
-	return value;
-}
-
 
 static if(bc.platform.threadingSupported) {
 
@@ -110,11 +96,11 @@ static if(bc.platform.threadingSupported) {
 	/// free(channel);
 	/// ---
 	size_t length(T)(Channel!T* channel) @trusted {
-		bc.mutex.lockForWriting(channel.lock);
+		bc.mutex.lockForReading(channel.lock);
 		immutable n = channel.count;
 		assert(channel.capacity == dynamicExtent || n <= channel.capacity, "bc.channel: more values than the capacity");
 		assert(channel.capacity != dynamicExtent || n == fp.dynarray.length(channel.buffer) - channel.head, "bc.channel: a count that disagrees with the buffer");
-		bc.mutex.unlockForWriting(channel.lock);
+		bc.mutex.unlockForReading(channel.lock);
 		return n;
 	}
 
@@ -242,7 +228,7 @@ static if(bc.platform.threadingSupported) {
 			bc.mutex.lockForWriting(channel.lock);
 			if(channel.count > 0) {
 				T taken;
-				if(dynamic) taken = takeFront(channel.buffer, channel.head);
+				if(dynamic) taken = fp.dynarray.takeFrontAmortized(channel.buffer, channel.head);
 				else {
 					taken = channel.buffer[channel.head];
 					// Leaving the copy would keep whatever it references alive until a later send overwrites the slot.
@@ -281,6 +267,7 @@ static if(bc.platform.threadingSupported) {
 	/// free(channel);
 	/// ---
 	void close(T)(Channel!T* channel) @trusted {
+		assert(channel !is null, "bc.channel.receive: no channel");
 		bc.mutex.lockForWriting(channel.lock);
 		core.atomic.atomicStore(channel.closed, true);
 		immutable senders = channel.sendersWaiting;
@@ -426,7 +413,7 @@ std.typecons.Nullable!T receive(T)(LocalChannel!T* channel) @trusted {
 	assert(channel !is null, "bc.channel.receive: no channel");
 	immutable before = length(channel);
 	if(before == 0) return std.typecons.Nullable!T.init;
-	auto value = std.typecons.nullable(takeFront(channel.buffer, channel.head));
+	auto value = std.typecons.nullable(fp.dynarray.takeFrontAmortized(channel.buffer, channel.head));
 	assert(length(channel) == before - 1, "bc.channel.receive: a receive that did not take exactly one value");
 	return value;
 }
